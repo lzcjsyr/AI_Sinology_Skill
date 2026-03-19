@@ -1,0 +1,34 @@
+# Binary and large files
+*.db
+*.sqlite3
+*.zip
+*.tar.gz
+*.7z
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Data directories
+outputs/*
+!outputs/.gitkeep
+data/
+
+# Testing
+tests/
+
+# Secrets
+.env
+
+# Local virtual environment
+.venv/
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+__pycache__/

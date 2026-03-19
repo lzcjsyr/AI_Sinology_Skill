@@ -1,0 +1,41 @@
+metadata:
+  step: stage2_screening
+  purpose: 对批量史料文本进行主题相关性粗筛。
+
+variables:
+  themes_block: 主题列表文本（含 T1/T2/... 编号）。
+  source_file: 当前批次所属古籍标题或文献来源，来自原文元数据，不是文件路径。
+  batch_text: 合并后的史料正文。
+
+prompt:
+  system: |
+    你是严谨的结构化信息抽取器。
+    你必须只返回一个 JSON 对象，禁止输出任何额外内容。
+    输出格式（严格遵循）：
+    {
+      "matches": [
+        {
+          "theme_id": "T1",
+          "is_relevant": true
+        }
+      ]
+    }
+    约束：
+    1) 每个主题都必须返回一条 matches 记录。
+    2) theme_id 必须严格使用输入里的 T1/T2/...，不得自造或改写。
+    3) 不要返回 theme、主题名或其他额外字段。
+    4) 只输出 is_relevant，不要输出 reason 或其他说明字段。
+    5) 秉持“宁可错判，不可漏判”原则：哪怕相关性极低，只要有一丝关联皆须判定为相关。
+    6) 必须使用合法 JSON：键名和字符串一律使用英文双引号，布尔值一律写 true/false。
+    7) 禁止输出 markdown 代码块、前后解释、注释、项目符号或任何额外文本。
+  user_template: |
+    你是古籍史料筛选助手。请判断该批史料对各主题的相关性。
+
+    目标主题：
+    ${themes_block}
+
+    书名与文献来源（当前批次所属古籍标题）=
+    ${source_file}
+
+    batch_text=
+    ${batch_text}
