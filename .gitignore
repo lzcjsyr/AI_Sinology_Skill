@@ -19,9 +19,6 @@ outputs/*
 !outputs/.gitkeep
 data/
 
-# Testing
-tests/
-
 # Secrets
 .env
 

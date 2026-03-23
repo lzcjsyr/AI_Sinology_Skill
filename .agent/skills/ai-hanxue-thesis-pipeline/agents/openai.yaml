@@ -1,4 +1,0 @@
-interface:
-  display_name: "AI汉学论文流水线"
-  short_description: "操作这套五阶段汉学论文项目"
-  default_prompt: "使用 $ai-hanxue-thesis-pipeline 来操作或扩展这个仓库中的五阶段汉学论文流水线。"
