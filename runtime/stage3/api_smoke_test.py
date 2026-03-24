@@ -3,12 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 
-from .api_config import STAGE2_MODELS, merged_env, slot_payload
+from .api_config import STAGE3_MODELS, merged_env, slot_payload
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="对阶段二模型槽位做最小 API 连通性测试。")
-    parser.add_argument("--slot", choices=sorted(STAGE2_MODELS.keys()), default="llm1", help="测试哪个模型槽位。")
+    parser = argparse.ArgumentParser(description="对阶段三模型槽位做最小 API 连通性测试。")
+    parser.add_argument("--slot", choices=sorted(STAGE3_MODELS.keys()), default="llm1", help="测试哪个模型槽位。")
     parser.add_argument("--env-file", help="可选 .env 文件路径。默认读取当前目录下的 .env。")
     parser.add_argument("--json", action="store_true", help="输出 JSON。")
     return parser

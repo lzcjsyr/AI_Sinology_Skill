@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import json
 from pathlib import Path
 
-PROJECT_PROGRESS_FILE = "project_progress.yaml"
+
+SKILL_ROOT = Path(__file__).resolve().parent.parent
+WORKSPACE_CONTRACT_ASSET = SKILL_ROOT / "assets" / "workspace-contract.json"
 
 
 @dataclass(frozen=True)
@@ -40,35 +44,32 @@ class ProjectStatus:
     next_stage: int | None
 
 
-STAGES: tuple[StageDefinition, ...] = (
-    StageDefinition(
-        index=1,
-        name="选题与构思",
-        required_all=("1_research_proposal.md",),
-    ),
-    StageDefinition(
-        index=2,
-        name="外部史料总库",
-        required_all=("2_final_corpus.yaml",),
-        recommended=("2_stage2_manifest.json",),
-    ),
-    StageDefinition(
-        index=3,
-        name="论纲构建",
-        required_all=("3_outline_matrix.yaml",),
-    ),
-    StageDefinition(
-        index=4,
-        name="初稿写作",
-        required_all=("4_first_draft.md",),
-    ),
-    StageDefinition(
-        index=5,
-        name="润色与终稿",
-        required_any=("5_final_manuscript.md", "5_final_manuscript.docx"),
-        recommended=("5_revision_checklist.md",),
-    ),
-)
+@lru_cache(maxsize=1)
+def workspace_contract_payload() -> dict[str, object]:
+    return json.loads(WORKSPACE_CONTRACT_ASSET.read_text(encoding="utf-8"))
+
+
+def project_progress_filename() -> str:
+    payload = workspace_contract_payload()
+    return str(payload["project_progress_file"])
+
+
+@lru_cache(maxsize=1)
+def stage_definitions() -> tuple[StageDefinition, ...]:
+    payload = workspace_contract_payload()
+    definitions: list[StageDefinition] = []
+    for raw_stage in payload["stages"]:
+        definitions.append(
+            StageDefinition(
+                index=int(raw_stage["index"]),
+                name=str(raw_stage["name"]),
+                required_all=tuple(raw_stage.get("required_all", [])),
+                required_any=tuple(raw_stage.get("required_any", [])),
+                recommended=tuple(raw_stage.get("recommended", [])),
+            )
+        )
+    definitions.sort(key=lambda item: item.index)
+    return tuple(definitions)
 
 
 def list_projects(outputs_root: str | Path) -> list[str]:
@@ -93,11 +94,7 @@ def inspect_stage(project_dir: Path, definition: StageDefinition) -> StageSnapsh
         missing_required = missing_required + definition.required_any
 
     complete = not missing_required and any_satisfied
-    present_files = tuple(
-        dict.fromkeys(
-            present_required_all + present_required_any + present_recommended
-        )
-    )
+    present_files = tuple(dict.fromkeys(present_required_all + present_required_any + present_recommended))
     if complete:
         status = "complete"
     elif present_files:
@@ -119,8 +116,8 @@ def inspect_stage(project_dir: Path, definition: StageDefinition) -> StageSnapsh
 def inspect_project(outputs_root: str | Path, project_name: str) -> ProjectStatus:
     root = Path(outputs_root).expanduser().resolve()
     project_dir = root / project_name
-    progress_file = project_dir / PROJECT_PROGRESS_FILE
-    stages = tuple(inspect_stage(project_dir, stage) for stage in STAGES)
+    progress_file = project_dir / project_progress_filename()
+    stages = tuple(inspect_stage(project_dir, stage) for stage in stage_definitions())
 
     highest_completed_stage = 0
     for stage in stages:
@@ -129,7 +126,7 @@ def inspect_project(outputs_root: str | Path, project_name: str) -> ProjectStatu
         else:
             break
 
-    next_stage = None if highest_completed_stage == len(STAGES) else highest_completed_stage + 1
+    next_stage = None if highest_completed_stage == len(stages) else highest_completed_stage + 1
     return ProjectStatus(
         project_name=project_name,
         project_dir=project_dir,

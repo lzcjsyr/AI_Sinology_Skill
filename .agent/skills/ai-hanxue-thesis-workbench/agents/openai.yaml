@@ -1,4 +1,0 @@
-interface:
-  display_name: "AI汉学论文工作台"
-  short_description: "以 Skill 驱动阶段一、三、四、五的汉学论文创作"
-  default_prompt: "使用 $ai-hanxue-thesis-workbench 基于外部阶段二史料总库推进当前汉学论文项目。"

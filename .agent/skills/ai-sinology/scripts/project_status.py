@@ -4,11 +4,11 @@ import argparse
 import json
 from pathlib import Path
 
-from .workspace_contract import inspect_project, list_projects
+from workspace_contract import inspect_project, list_projects
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="检查 skill 工作区中的项目进度。")
+    parser = argparse.ArgumentParser(description="检查 Skill 工作区中的项目进度。")
     parser.add_argument("project", nargs="?", help="单个项目名。")
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
     parser.add_argument("--all", action="store_true", help="显示全部项目。")

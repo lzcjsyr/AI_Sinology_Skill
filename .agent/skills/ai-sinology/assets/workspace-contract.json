@@ -1,0 +1,52 @@
+{
+  "project_progress_file": "project_progress.yaml",
+  "stages": [
+    {
+      "index": 1,
+      "name": "选刊校准与选题构思",
+      "required_all": ["1_journal_targeting.md", "1_research_proposal.md"],
+      "required_any": [],
+      "recommended": []
+    },
+    {
+      "index": 2,
+      "name": "学术史地图",
+      "required_all": ["2_scholarship_map.yaml"],
+      "required_any": [],
+      "recommended": []
+    },
+    {
+      "index": 3,
+      "name": "外部一手史料总库",
+      "required_all": ["3_final_corpus.yaml"],
+      "required_any": [],
+      "recommended": ["3_stage3_manifest.json"]
+    },
+    {
+      "index": 4,
+      "name": "论纲构建与论证审计",
+      "required_all": ["4_outline_matrix.yaml", "4_argument_audit.md"],
+      "required_any": [],
+      "recommended": []
+    },
+    {
+      "index": 5,
+      "name": "初稿写作",
+      "required_all": ["5_first_draft.md"],
+      "required_any": [],
+      "recommended": []
+    },
+    {
+      "index": 6,
+      "name": "投稿整备与终稿",
+      "required_all": [
+        "6_abstract_keywords.md",
+        "6_title_options.md",
+        "6_anonymous_submission_checklist.md",
+        "6_claim_boundary.md"
+      ],
+      "required_any": ["6_final_manuscript.md", "6_final_manuscript.docx"],
+      "recommended": ["6_revision_checklist.md"]
+    }
+  ]
+}

@@ -29,7 +29,7 @@ PROVIDER_API_KEYS_ENV_NAMES: dict[str, str] = {
 
 
 @dataclass(frozen=True)
-class Stage2ModelConfig:
+class Stage3ModelConfig:
     slot: str
     provider: str
     model: str
@@ -37,22 +37,22 @@ class Stage2ModelConfig:
     tpm: int
 
 
-STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
-    "llm1": Stage2ModelConfig(
+STAGE3_MODELS: dict[str, Stage3ModelConfig] = {
+    "llm1": Stage3ModelConfig(
         slot="llm1",
         provider="volcengine",
         model="deepseek-v3-2-251201",
         rpm=15000,
         tpm=1500000,
     ),
-    "llm2": Stage2ModelConfig(
+    "llm2": Stage3ModelConfig(
         slot="llm2",
         provider="volcengine",
         model="deepseek-v3-2-251201",
         rpm=15000,
         tpm=1500000,
     ),
-    "llm3": Stage2ModelConfig(
+    "llm3": Stage3ModelConfig(
         slot="llm3",
         provider="volcengine",
         model="doubao-seed-2-0-pro-260215",
@@ -61,7 +61,7 @@ STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
     ),
 }
 
-STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
+STAGE3_RUNTIME_DEFAULTS: dict[str, Any] = {
     "screening_batch_max_chars": 300,
     "fragment_max_attempts": 3,
     "max_empty_retries": 2,
@@ -130,7 +130,7 @@ def slot_payload(
     dotenv_path: str | Path | None = None,
     env_values: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    config = STAGE2_MODELS[slot]
+    config = STAGE3_MODELS[slot]
     api_key, api_keys = resolve_provider_keys(
         config.provider,
         dotenv_path=dotenv_path,

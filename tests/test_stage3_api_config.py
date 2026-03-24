@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from runtime.stage2.api_config import resolve_provider_keys, slot_payload
+from runtime.stage3.api_config import resolve_provider_keys, slot_payload
 
 
-class Stage2ApiConfigTests(unittest.TestCase):
+class Stage3ApiConfigTests(unittest.TestCase):
     def test_resolve_provider_keys_merges_pool_and_primary_key(self) -> None:
         primary, pool = resolve_provider_keys(
             "volcengine",
