@@ -1,60 +1,49 @@
 # 仓库地图
 
-## 目录
+## 主要目录
 
 - `./.agent/skills/ai-sinology/`
-  - 当前主 Skill。
-  - 负责阶段一、二、四、五、六的创作方法、阶段三交接契约、工作区契约和项目辅助脚本。
-- `./.agent/skills/ai-sinology/assets/`
-  - Skill 内部的机器可读资源。
-  - `workspace-contract.json` 是工作区契约的单一真相源。
+  当前主 Skill。这里放写作规则、项目脚本和工作区契约。
+- `./.agent/skills/ai-sinology/references/`
+  各阶段的说明文档。只在对应任务发生时再读。
 - `./.agent/skills/ai-sinology/scripts/`
-  - Skill 内部的确定性辅助脚本。
-  - 负责项目初始化、进度同步和项目状态检查。
+  本地辅助脚本。负责项目初始化、进度同步和项目状态查看。
+- `./.agent/skills/ai-sinology/assets/workspace-contract.json`
+  工作区契约的机器可读真相源。
 - `./runtime/stage3/`
-  - 外部阶段三运行时的辅助模块。
-  - 负责阶段三项目选择、`_stage3/` 工作目录初始化、会话续跑、manifest 配置、环境检查、scope 探测和 API 烟雾测试。
+  阶段三外部运行时。负责材料总库相关的辅助执行、检查和续跑。
 - `./outputs/`
-  - 每个研究项目的实际产物目录。
-  - 阶段三过程文件统一放在 `outputs/<project>/_stage3/`。
-- `./data/`
-  - 可选的本地数据区；Kanripo 数据不再被 Skill 直接绑定。
+  每个论文项目的实际产物目录。
 
-## 仓库原则
+## 常见修改点
 
-- 这是 Skill-first 仓库，不再维护旧的 CLI orchestration。
-- 创作规则写进 Skill reference，确定性辅助逻辑优先写进 Skill `scripts/`，运行时探测和连通性检查写进 `runtime/stage3/`。
-- 工作区契约先修改 `assets/workspace-contract.json`，再同步更新 `references/workspace-contract.md`。
-
-## 常见落点
-
-- 改工作区阶段判定或文件名：
-  - `.agent/skills/ai-sinology/assets/workspace-contract.json`
-  - `.agent/skills/ai-sinology/scripts/workspace_contract.py`
-  - `.agent/skills/ai-sinology/references/workspace-contract.md`
+- 改工作区阶段判定、文件名或契约：
+  - `./.agent/skills/ai-sinology/assets/workspace-contract.json`
+  - `./.agent/skills/ai-sinology/scripts/workspace_contract.py`
+  - `./.agent/skills/ai-sinology/references/workspace-contract.md`
 - 改项目初始化或进度同步：
-  - `.agent/skills/ai-sinology/scripts/init_project.py`
-  - `.agent/skills/ai-sinology/scripts/sync_progress.py`
+  - `./.agent/skills/ai-sinology/scripts/init_project.py`
+  - `./.agent/skills/ai-sinology/scripts/sync_progress.py`
 - 改项目状态查看：
-  - `.agent/skills/ai-sinology/scripts/project_status.py`
-- 改阶段三模型槽位、provider 或 env key 名：
-  - `runtime/stage3/api_config.py`
-- 改 Kanripo scope catalog 解析：
-  - `runtime/stage3/catalog.py`
+  - `./.agent/skills/ai-sinology/scripts/project_status.py`
 - 改阶段一写法：
-  - `references/stage1-planning.md`
+  - `./.agent/skills/ai-sinology/references/stage1-planning.md`
+  - `./.agent/skills/ai-sinology/references/stage1-venues.md`
+  - `./.agent/skills/ai-sinology/references/` 下对应的单刊文件
 - 改阶段二写法：
-  - `references/stage2-scholarship-map.md`
-- 改阶段三写法：
-  - `references/stage3-handoff.md`
+  - `./.agent/skills/ai-sinology/references/stage2b-scholarship-map.md`
+  - `./.agent/skills/ai-sinology/references/stage2a-data-intake.md`
+- 改阶段三交接：
+  - `./.agent/skills/ai-sinology/references/stage3-handoff.md`
+  - `./runtime/stage3/`
 - 改阶段四写法：
-  - `references/stage4-outlining.md`
-  - `references/stage4-argument-audit.md`
+  - `./.agent/skills/ai-sinology/references/stage4-outlining.md`
+  - `./.agent/skills/ai-sinology/references/stage4-argument-audit.md`
 - 改阶段五写法：
-  - `references/stage5-drafting.md`
+  - `./.agent/skills/ai-sinology/references/stage5-drafting.md`
 - 改阶段六写法：
-  - `references/stage6-polishing.md`
-  - `references/stage6-submission-package.md`
+  - `./.agent/skills/ai-sinology/references/stage6-polishing.md`
+  - `./.agent/skills/ai-sinology/references/stage6-submission-package.md`
 
 ## 验证
 

@@ -1,127 +1,85 @@
 ---
 name: ai-sinology
-description: 用于以 Skill 方式推进汉学论文项目。适用于阶段一选刊与研究计划、阶段二学术史地图、阶段三一手史料总库、阶段四论纲与论证审计、阶段五初稿写作、阶段六润色定稿，以及管理当前仓库中的工作区契约、项目初始化和与外部阶段三史料总库的交接。
+description: 用于撰写和推进中国古代文学、古典文献、古代文论、文学批评史与相关文献学方向的论文项目。适用于选题、选刊、研究计划、学术史梳理、一手材料交接后的论纲设计、初稿写作、终稿润色，以及管理当前仓库中的项目初始化、阶段进度与工作区契约；当用户要求按阶段推进论文、补全 `outputs/<project>/` 阶段文件，或调整相关脚本与契约时使用。
 ---
 
-# AI 汉学论文工作台
+# 中国古代文学论文 Skill
 
-## 先读哪些文件
+## 先判断任务
 
-- 先读 `references/repo-map.md`，确认这个仓库现在只保留 Skill 与外部阶段三运行时。
-- 用户明确要求按国内 A 刊标准推进，或任务涉及阶段一、二、四、五、六的学术写作判断时，再读 `references/a-journal-writing.md`。
-- 涉及阶段边界、输出文件或 `piece_id` 约束时，再读 `references/workspace-contract.md`。
-- 涉及 Skill 与外部阶段三执行器之间的交接时，再读 `references/stage3-handoff.md`。
-- 只处理某一阶段时，只加载对应阶段 reference，不要把所有 reference 一次性读进上下文。
+- 先判断当前任务属于哪一类：新建项目、推进某一阶段、查看项目状态、修改契约或脚本。
+- 已有项目时，先看 `outputs/<project>/project_progress.yaml`；没有项目时，先用 `scripts/init_project.py` 创建项目目录。
+- 只读取当前任务需要的 reference，不要一次性把全部 reference 读进上下文。
 
-## 不可破坏的约束
+## 按需读取
 
-- 把这个仓库视为 Skill 工作台，不要重新引入 `main.py`、`core/`、`workflow/`、`prompts/` 这一类旧流水线骨架。
-- 新建项目时，始终把项目目录创建在当前工作目录的 `outputs/<project>/` 下，不要写到别的目录。
-- 新建项目时，始终同时创建 `outputs/<project>/project_progress.yaml`，用于说明当前阶段、已完成文件和下一步。
-- 工作区契约的机器可读真相源是 `assets/workspace-contract.json`；若契约变动，先改这里，再同步更新 reference 文档。
-- 把阶段三数据库、真实检索执行器和批量 API 调用留在 Skill 外部。
-- 运行阶段三 CLI 时，先选择 `outputs/<project>/` 下的项目，再创建并使用 `outputs/<project>/_stage3/` 作为阶段三工作目录。
-- 外部阶段三的过程文件应统一写入 `outputs/<project>/_stage3/`。
-- 外部阶段三最终至少写回 `outputs/<project>/3_final_corpus.yaml`，并保留 `outputs/<project>/3_stage3_manifest.json`。
-- 在阶段四、五、六中始终保留 `piece_id` 可追溯性，不要伪造或重写不存在的锚点。
+- 新建项目、确认阶段文件、查看文件命名：读 `references/workspace-contract.md`。
+- 了解仓库结构，或准备改脚本职责：读 `references/repo-map.md`。
+- 阶段一：读 `references/stage1-planning.md`。
+  选刊时先读 `references/stage1-venues.md`，锁定目标期刊后再读对应的单刊 reference；如果需要按国内 A 刊标准推进，再加读 `references/a-journal-writing.md`。
+- 阶段二：先读 `references/stage2b-scholarship-map.md` 理解正式输出，再读 `references/stage2a-data-intake.md` 理解 `2A` 检索扩展与候选集收敛；需要稳定复用开放 API 时，优先调用 `scripts/stage2a_sources.py` 和 `scripts/stage2b_scholarship_map.py`，不要每次现场重写抓取代码；如果需要按国内 A 刊标准推进，再加读 `references/a-journal-writing.md`。
+- 阶段三交接：读 `references/stage3-handoff.md`。
+- 阶段四：读 `references/stage4-outlining.md` 和 `references/stage4-argument-audit.md`。
+  如果需要按国内 A 刊标准推进，再加读 `references/a-journal-writing.md`。
+- 阶段五：读 `references/stage5-drafting.md`。
+  如果需要按国内 A 刊标准推进，再加读 `references/a-journal-writing.md`。
+- 阶段六：读 `references/stage6-polishing.md` 和 `references/stage6-submission-package.md`。
+  如果需要按国内 A 刊标准推进，再加读 `references/a-journal-writing.md`。
+
+## 核心写作规则
+
+- 把重点放在论文判断、材料组织和写作推进，不要把输出写成流程说明或项目管理清单。
+- 把整个过程视为投稿准备，而不是信息拼装。默认目标是：问题意识清楚、学术史位置明确、一手材料可复核、论证链条闭合。
+- 阶段一先收束两个结果：明确的研究方向、明确的目标期刊。
+- 如果用户没有说清投稿目标，先追问。
+- 如果用户点名的目标期刊不在现有单刊 reference 内，优先请用户提供该刊官网、征稿说明、投稿须知或近年栏目页链接；先据此提炼要求，再继续阶段一。
+- 阶段二只负责学术史地图，不要和阶段三的一手材料总库混写。
+- 阶段二默认拆成 `2A` 与 `2B` 两个子环节：`2A` 负责检索扩展与候选集收敛，`2B` 负责学术史地图写作；正式阶段文件是 `2b_scholarship_map.yaml`。
+- 阶段二如需重复抓取 `OpenAlex`、`Crossref`、`DOAJ` 等开放来源，优先复用 `scripts/stage2a_sources.py`。
+- 阶段二的主流程应由 agent 自主执行：先读阶段一，判断研究对象、概念轴线、时段和候选争点，再分多轮调用 `scripts/stage2a_sources.py`，完成 `2A` 的候选集收敛，最后进入 `2B` 完成 scholarship map 写作。
+- 如果阶段二以 `OpenAlex` 为主入口，默认先做关键词检索，再由 agent 阅读返回结果、挑出值得继续追踪的作品，沿这些作品的引用链继续扩展，而不是只停留在第一屏搜索结果。
+- `2A` 本身包含学术判断：agent 应根据题名、摘要、刊物、作者与引用链判断哪些结果保留、哪些结果继续扩展、哪些结果应剔除。
+- `openalex-expand` 只负责按 agent 给定的 seed works 抓取一跳引用，不负责判断是否相关，也不负责决定是否继续下一轮。
+- `OpenAlex` 多轮扩展的默认目标是沉淀约 30 篇高相关作品；轮次由 agent 结合每轮新增结果质量、重复度和偏题程度决定，不要求机械跑满固定轮数。
+- 如果开放来源覆盖明显不足，阶段二应停在 `2A`，等待用户补充外部资料后再继续。
+- `2B` 应在候选集相对稳定后再开始；这时重点是归纳 positions、debates、gaps 和 claim boundaries，而不是继续无边界扩搜。
+- `scripts/stage2b_scholarship_map.py` 只是草稿骨架工具，不替代 agent 的学术判断。
+- 阶段三只负责材料交接与消费，不在 Skill 内重建数据库、批量检索或真实执行器。
+- 阶段四先搭建“中心论题 -> 分论点 -> 证据节点”的骨架，再做论证审计，不要跳过压力测试直接起草。
+- 阶段五每一节都要形成“论点 -> 史料 -> 分析 -> 学术回应”的链条，不能只堆史料，也不能只讲空泛理论。
+- 阶段六保留论证结构与锚点，完成终稿、摘要关键词、题目备选、匿名投稿检查和论断边界说明。
+- 如无充分证据，不要宣称“首次”“填补空白”或“彻底改写学界认识”。
+- 不要伪造文献、引文、出处或 `piece_id`。没有来源支撑的判断，不能写进正文结论。
+
+## 项目与文件规则
+
+- 所有项目都放在 `outputs/<project>/` 下。
+- 新建项目时，同时创建 `outputs/<project>/project_progress.yaml`。
+- 每推进一个阶段，都更新 `project_progress.yaml`；优先使用 `scripts/sync_progress.py`。
+- 工作区契约的机器可读真相源是 `assets/workspace-contract.json`；契约变动时，先改这里，再同步 `references/workspace-contract.md`。
+- 阶段二过程文件与人工补料说明推荐放在 `outputs/<project>/_stage2a/`。
+- 阶段三过程文件统一放在 `outputs/<project>/_stage3/`。
+- 阶段三完成后，项目里至少要有 `outputs/<project>/3_final_corpus.yaml`；如已生成 `outputs/<project>/3_stage3_manifest.json`，一并保留。
 - 默认终稿是 `6_final_manuscript.md`；只有用户明确要求时，才额外产出 `.docx`。
 
-## 按任务类型处理
-
-## A刊导向协作总则
-
-- 把整个流程都当作“面向匿名审稿与编辑初筛的投稿工作流”，不是信息拼装。
-- 默认目标是：问题意识清楚、学术史位置明确、一手材料可复核、论证链条闭合、注释与引文经得起编辑核查。
-- 阶段一先完成目标刊物校准，再回答“学界已做了什么、还缺什么、我凭什么用这批材料推进一步”，再落到题目和章节想象。
-- 阶段二单独构建学术史地图；其数据源、筛选逻辑和分析动作与阶段三不同，不要混写成一个文件。
-- 阶段三只负责一手史料总库，不承担学术史判断。
-- 阶段四先搭建“中心论题 -> 分论点 -> 证据节点”的推理骨架，再做一次论证审计，不要跳过压力测试直接起草。
-- 阶段五每一节都要让论点、史料、分析、学术回应成链条，不允许只有史料转述或只有理论空话。
-- 阶段六默认按顶刊编辑视角做终检，并交付投稿包，而不只是单一终稿文件。
-- 如无充分证据，不要宣称“首次”“填补空白”“完全改写学界认识”；只能在学术史比较后谨慎判断创新幅度。
-- 可以用 AI 做语言润色、结构梳理、检索提示，但不得伪造文献、伪造引文、伪造 `piece_id`，也不得让 AI 代写核心观点与主体论证。
-
-### 阶段一
-
-- 读取 `references/stage1-planning.md`。
-- 如用户要求按国内 A 刊标准起稿，同时读取 `references/a-journal-writing.md`。
-- 产出 `1_journal_targeting.md` 与 `1_research_proposal.md`，不要再为这一阶段补脚本。
-
-### 阶段二
-
-- 读取 `references/stage2-scholarship-map.md`。
-- 如用户要求按国内 A 刊标准推进，同时读取 `references/a-journal-writing.md`。
-- 基于阶段一的题目校准与研究计划，结合用户提供文献、数据库结果或联网检索，生成 `2_scholarship_map.yaml`。
-
-### 阶段三
-
-- 读取 `references/stage3-handoff.md`。
-- 外部执行器至少写回 `3_final_corpus.yaml`。
-- 阶段三完成不等于学术史工作完成。
-
-### 阶段四
-
-- 读取 `references/stage4-outlining.md`。
-- 再读 `references/stage4-argument-audit.md`。
-- 如用户要求按国内 A 刊标准推进，同时读取 `references/a-journal-writing.md`。
-- 使用阶段二 scholarship map 与阶段三 corpus 生成 `4_outline_matrix.yaml` 与 `4_argument_audit.md`。
-
-### 阶段五
-
-- 读取 `references/stage5-drafting.md`。
-- 如用户要求按国内 A 刊标准推进，同时读取 `references/a-journal-writing.md`。
-- 基于论纲、论证审计和 corpus 写出带 `piece_id` 锚点的初稿。
-
-### 阶段六
-
-- 读取 `references/stage6-polishing.md`。
-- 再读 `references/stage6-submission-package.md`。
-- 如用户要求按国内 A 刊标准推进，同时读取 `references/a-journal-writing.md`。
-- 保留论证结构与锚点，完成终稿、摘要关键词、题目备选、匿名投稿检查与论断边界说明。
-
-### 改仓库结构或契约
-
-- 先读 `references/repo-map.md`、`references/workspace-contract.md` 和 `assets/workspace-contract.json`。
-- 把通用工作区辅助逻辑优先放在当前 Skill 的 `scripts/`，只把阶段三外部执行必需的运行时留在 `runtime/stage3/`。
-
-### 新建项目
-
-- 优先调用 `scripts/init_project.py` 初始化 `outputs/<project>/` 和 `project_progress.yaml`。
-- 再开始写 `1_research_proposal.md` 或其他阶段文件。
-- 每推进一个阶段，都同步更新 `project_progress.yaml`；优先调用 `scripts/sync_progress.py`。
-
-## Skill 内部辅助命令
+## 常用命令
 
 ```bash
 python3 .agent/skills/ai-sinology/scripts/init_project.py demo
 python3 .agent/skills/ai-sinology/scripts/project_status.py --all
 python3 .agent/skills/ai-sinology/scripts/sync_progress.py demo
-```
-
-## 外部阶段三辅助命令
-
-```bash
+python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
+python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex-expand --project demo --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --env-file .env
+python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo --source-json outputs/demo/_stage2a/openalex-*.json
 python3 -m runtime.stage3.cli
-python3 -m runtime.stage3.cli --project demo --source stage1 --repos KR3j0160,KR3j0161
-python3 -m runtime.stage3.cli --project demo --show-checkpoint
-python3 -m runtime.stage3.cli --project demo --checkpoint-action checkpoint --checkpoint-cursor offset=120 --checkpoint-piece-id pb:KR3j0160_010-2b
-python3 -m runtime.stage3.env_check --kanripo-root /path/to/kanripo_repos
-python3 -m runtime.stage3.scope_probe --kanripo-root /path/to/kanripo_repos --limit 20
-python3 -m runtime.stage3.api_smoke_test --slot llm1 --env-file .env
 ```
 
-阶段三 CLI 会在项目目录下维护：
-
-- 正式 manifest：`outputs/<project>/3_stage3_manifest.json`
-- 阶段三工作目录：`outputs/<project>/_stage3/`
-- 续跑会话文件：`outputs/<project>/_stage3/session.json`
-
-如果阶段三拆成多次运行，外部执行器下次进入项目时应优先读取 `session.json` 里的 `retrieval_progress`，按 `current_target`、`current_cursor`、`last_piece_id` 等断点继续，而不是重头扫描。
+更具体的阶段三交接方式，放在 `references/stage3-handoff.md`，不要把长命令和运行细节塞回这里。
 
 ## 需要停下来问用户的情况
 
-- 阶段二还没有产出 `2_scholarship_map.yaml`，但用户要求直接进入阶段四或之后的步骤。
-- 外部阶段三还没有产出 `3_final_corpus.yaml`，但用户要求直接进入阶段四或之后的步骤。
-- 用户希望放宽 `piece_id` 追溯约束，或者允许没有来源的论据进入终稿。
-- 用户要求把阶段三数据库或真实检索逻辑重新塞回 Skill 内。
-- 用户要求 `.docx`，但当前任务上下文没有启用合适的文档处理能力。
+- 阶段二还没有产出 `2b_scholarship_map.yaml`，但用户要求直接进入阶段四或之后。
+- 阶段三还没有产出 `3_final_corpus.yaml`，但用户要求直接进入阶段四或之后。
+- 用户希望放宽 `piece_id` 追溯约束，或允许没有来源的论据进入正文。
+- 用户要求把阶段三数据库、真实检索逻辑或批量 API 调用重新塞回 Skill。
+- 用户要求 `.docx`，但当前上下文没有可用的文档处理能力。

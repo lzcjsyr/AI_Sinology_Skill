@@ -4,7 +4,7 @@
 
 - `4_outline_matrix.yaml`
 - `4_argument_audit.md`
-- `2_scholarship_map.yaml`
+- `2b_scholarship_map.yaml`
 - `3_final_corpus.yaml`
 
 ## 输出

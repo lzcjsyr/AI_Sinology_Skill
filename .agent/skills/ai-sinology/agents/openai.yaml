@@ -1,4 +1,4 @@
 interface:
   display_name: "ai-sinology"
-  short_description: "以投稿导向工作流推进汉学论文创作与工作区管理"
-  default_prompt: "使用 $ai-sinology 基于阶段一选刊校准、阶段二学术史地图、阶段三一手史料总库推进当前汉学论文项目。"
+  short_description: "推进中国古代文学论文写作、项目初始化与阶段管理"
+  default_prompt: "使用 $ai-sinology 推进当前中国古代文学、古代文论或古典文献论文项目，按需要处理阶段一选刊与研究计划、阶段二的 2A 检索收敛与 2B 学术史地图、阶段三材料交接、阶段四论纲与论证审计、阶段五初稿、阶段六定稿，并维护项目初始化与工作区契约。"

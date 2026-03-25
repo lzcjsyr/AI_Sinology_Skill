@@ -42,7 +42,7 @@ class WorkspaceContractTests(unittest.TestCase):
             project.mkdir()
             (project / "1_journal_targeting.md").write_text("ok\n", encoding="utf-8")
             (project / "1_research_proposal.md").write_text("ok\n", encoding="utf-8")
-            (project / "2_scholarship_map.yaml").write_text("research_question: \"x\"\n", encoding="utf-8")
+            (project / "2b_scholarship_map.yaml").write_text("research_question: \"x\"\n", encoding="utf-8")
 
             status = inspect_project(outputs, "demo")
 
@@ -60,7 +60,7 @@ class WorkspaceContractTests(unittest.TestCase):
                 "project_progress.yaml",
                 "1_journal_targeting.md",
                 "1_research_proposal.md",
-                "2_scholarship_map.yaml",
+                "2b_scholarship_map.yaml",
                 "3_final_corpus.yaml",
                 "4_outline_matrix.yaml",
                 "4_argument_audit.md",

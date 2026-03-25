@@ -57,6 +57,42 @@ class SkillIntegrityTests(unittest.TestCase):
         self.assertEqual(interface.get("display_name"), frontmatter.get("name"))
         self.assertTrue(interface.get("short_description"))
         self.assertIn(f"${frontmatter.get('name')}", interface.get("default_prompt", ""))
+        self.assertIn("阶段六", interface.get("default_prompt", ""))
+        self.assertIn("项目初始化", interface.get("default_prompt", ""))
+        self.assertIn("工作区契约", interface.get("default_prompt", ""))
+
+    def test_stage1_docs_capture_journal_clarification_rules(self) -> None:
+        skill_text = SKILL_FILE.read_text(encoding="utf-8")
+        planning_text = (SKILL_ROOT / "references" / "stage1-planning.md").read_text(encoding="utf-8")
+        contract_text = (SKILL_ROOT / "references" / "workspace-contract.md").read_text(encoding="utf-8")
+
+        self.assertIn("如果用户没有说清投稿目标，先追问", skill_text)
+        self.assertIn("如果用户给出的目标期刊不在现有 skills 的单刊 reference 内", planning_text)
+        self.assertIn("优先请用户提供该刊官网、征稿说明、投稿须知", planning_text)
+        self.assertIn("包含完整的目标期刊定位与写作建议", planning_text)
+        self.assertIn("经过讨论后确定的研究方向、准备投稿的目标期刊", contract_text)
+        self.assertIn("优先要求用户提供期刊网页并据此提炼要求", contract_text)
+
+    def test_stage2_docs_keep_agent_judgment_outside_fetch_scripts(self) -> None:
+        skill_text = SKILL_FILE.read_text(encoding="utf-8")
+        intake_text = (SKILL_ROOT / "references" / "stage2a-data-intake.md").read_text(encoding="utf-8")
+        scholarship_text = (SKILL_ROOT / "references" / "stage2b-scholarship-map.md").read_text(encoding="utf-8")
+
+        self.assertIn("阶段二默认拆成 `2A` 与 `2B`", skill_text)
+        self.assertIn("阶段二的主流程应由 agent 自主执行", skill_text)
+        self.assertIn("`2A` 本身包含学术判断", skill_text)
+        self.assertIn("“agent 多轮调脚本”", intake_text)
+        self.assertIn("`2A` 不是纯抓取环节", intake_text)
+        self.assertIn("人工干预点", intake_text)
+        self.assertIn("进入 `2B`", intake_text)
+        self.assertIn("进入 `2B` 的前提", scholarship_text)
+        self.assertIn("优先让 agent 根据当前任务上下文决定检索轮次和 query", scholarship_text)
+        self.assertIn("不负责判断是否相关", skill_text)
+        self.assertIn("都应由 agent 判断", intake_text)
+        self.assertIn("不负责判断相关性", scholarship_text)
+        self.assertNotIn("stage2_pipeline.py", skill_text)
+        self.assertNotIn("stage2_pipeline.py", intake_text)
+        self.assertNotIn("stage2_pipeline.py", scholarship_text)
 
 
 if __name__ == "__main__":

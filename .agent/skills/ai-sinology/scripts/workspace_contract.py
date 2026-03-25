@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Shared workspace-contract loader and stage inspector used by the
+# ai-sinology helper scripts.
+
 from dataclasses import dataclass
 from functools import lru_cache
 import json

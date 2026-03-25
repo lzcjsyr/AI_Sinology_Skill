@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Recompute project_progress.yaml from the current workspace contents so
+# the stage tracker stays aligned with the actual files on disk.
+
 import argparse
 from datetime import datetime
 from pathlib import Path

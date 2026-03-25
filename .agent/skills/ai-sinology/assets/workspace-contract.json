@@ -10,10 +10,10 @@
     },
     {
       "index": 2,
-      "name": "学术史地图",
-      "required_all": ["2_scholarship_map.yaml"],
+      "name": "2A检索收敛与2B学术史地图",
+      "required_all": ["2b_scholarship_map.yaml"],
       "required_any": [],
-      "recommended": []
+      "recommended": ["_stage2a"]
     },
     {
       "index": 3,

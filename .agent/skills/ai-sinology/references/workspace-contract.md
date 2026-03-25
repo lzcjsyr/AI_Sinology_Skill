@@ -37,20 +37,36 @@ Skill 在每次推进阶段后都应同步更新这个文件。
 - 文件：`1_journal_targeting.md`
 - 文件：`1_research_proposal.md`
 - 两个文件都视为阶段一必选产物。
-- `1_journal_targeting.md` 用于记录目标刊物、风格校准、篇幅体例与风险约束。
+- 阶段一完成时，应能明确读出两个结论：经过讨论后确定的研究方向、准备投稿的目标期刊。
+- `1_journal_targeting.md` 用于记录目标刊物、风格校准、篇幅体例、期刊定位、写作建议与风险约束。
 - 必须包含 YAML front matter。
 - front matter 至少包含：
   - `idea`
   - `target_themes`
+- 建议同时包含：
+  - `target_journal`
+  - `settled_research_direction`
 - `target_themes` 必须是给阶段三检索使用的主题，而不是最终论文结论句。
+- 如果用户起初没有说明投稿目标，Skill 应先追问；如果目标期刊不在内置单刊 reference 内，Skill 应优先要求用户提供期刊网页并据此提炼要求，只有网页拿不到时才补问期刊级别、文章样式、篇幅与体例等信息。
 
 ### 阶段二
 
-- 文件：`2_scholarship_map.yaml`
+- 文件：`2b_scholarship_map.yaml`
 - 这是独立于阶段三一手史料总库的学术史研究产物，不应与史料总库混写。
 - 可以由 Skill 结合用户提供书目、PDF、题录和联网检索生成。
+- 阶段二虽然只有一个正式阶段文件，但执行上默认拆成 `2A` 与 `2B`：
+  - `2A`：检索扩展与候选集收敛
+  - `2B`：学术史地图写作
+- 若使用 Skill 自带的开放来源脚本，推荐将过程文件保存在 `outputs/<project>/_stage2a/`。
+- `outputs/<project>/_stage2a/` 推荐包含：
+  - `openalex-*.json`
+  - `crossref-*.json`
+  - `doaj-*.json`
+  - `screening-notes.md`
+- 上述 `_stage2a/` 文件都属于过程产物，不替代正式阶段文件。
+- `2B` 应在 `2A` 的候选集相对稳定后再开始；如果来源覆盖不足，需要先停在 `2A` 等待用户补充资料。
 
-`2_scholarship_map.yaml` 的最小结构：
+`2b_scholarship_map.yaml` 的最小结构：
 
 ```yaml
 research_question: "..."

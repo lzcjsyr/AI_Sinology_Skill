@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Initialize a project workspace under outputs/<project>/ and create
+# the first project_progress.yaml snapshot used by later stages.
+
 import argparse
 from datetime import datetime
 from pathlib import Path

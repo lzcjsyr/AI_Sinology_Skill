@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Inspect one or more ai-sinology projects and report which stage files
+# are present, missing, or already complete.
+
 import argparse
 import json
 from pathlib import Path
