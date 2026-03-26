@@ -81,6 +81,7 @@ python3 .agent/skills/ai-sinology/scripts/init_project.py demo
 python3 .agent/skills/ai-sinology/scripts/project_status.py --all
 python3 .agent/skills/ai-sinology/scripts/sync_progress.py demo
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
+python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py baidu-scholar --project demo --query "汉代 灾异 诠释" --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo --source-json outputs/demo/_stage2a/openalex-xxx.json
 python3 -m runtime.stage3.cli
 python3 -m runtime.stage3.cli --project demo --source stage2 --repos KR3j0160,KR3j0161 --env-file .env
@@ -92,6 +93,7 @@ python3 -m runtime.stage3.cli --project demo --checkpoint-action complete --chec
 python3 -m runtime.stage3.env_check --kanripo-root /path/to/kanripo_repos
 python3 -m runtime.stage3.scope_probe --kanripo-root /path/to/kanripo_repos --limit 20
 python3 -m runtime.stage3.api_smoke_test --slot llm1 --env-file .env
+python3 -m runtime.stage3.baidu_scholar_smoke_test --query "汉代 灾异" --env-file .env
 pytest
 ```
 
@@ -188,6 +190,7 @@ pytest
 
 - 可直接自动处理的开放入口：
   - `OpenAlex`：阶段二默认主 API，用于 works、authors、sources、topics 与引用关系。
+  - `百度学术`：适合作为中文论文题录、摘要与期刊名的补充入口，当前通过千帆工具 API 接入。
 - 外部补料：
   - 用户自行补充导出题录、PDF、DOI、URL 或书目笔记
 
@@ -212,11 +215,13 @@ pytest
 
 ```bash
 OPENALEX_API_KEY=your_openalex_key
+QIANFAN_API_KEY=your_qianfan_api_key
 ```
 
 说明：
 
 - `OPENALEX_API_KEY`：阶段二如果直接调用 OpenAlex API，应配置此变量。
+- `QIANFAN_API_KEY`：如果要调用百度学术检索工具 `GET https://qianfan.baidubce.com/v2/tools/baidu_scholar/search`，应配置此变量，值直接放千帆控制台生成的 API Key，并以 `Authorization: Bearer <API_KEY>` 方式发送。
 - 其他来源默认按“用户先在外部补充资料，再交给 Skill 继续处理”的模式使用。
 
 更具体的阶段二来源策略见 `./.agent/skills/ai-sinology/references/stage2a-data-intake.md`。
@@ -225,6 +230,7 @@ OPENALEX_API_KEY=your_openalex_key
 
 ```bash
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
+python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py baidu-scholar --project demo --query "汉代 灾异 诠释" --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex-expand --project demo --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --per-page 10 --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo --source-json outputs/demo/_stage2a/openalex-xxx.json
 ```

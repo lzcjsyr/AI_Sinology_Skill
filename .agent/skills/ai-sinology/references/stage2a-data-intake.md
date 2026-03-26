@@ -47,6 +47,10 @@
   - 适合做阶段二默认主 API。
   - 可用于 works、authors、sources、topics、related works 与 citation graph。
   - 直接 API 模式应配置 `OPENALEX_API_KEY`。
+- `百度学术`
+  - 适合作为中文论文题录、摘要与期刊名的补充入口。
+  - 当前接入方式基于千帆工具 API，调用 `scripts/stage2a_sources.py baidu-scholar ...`。
+  - 直接 API 模式应配置 `QIANFAN_API_KEY`。
 ### 第二层：外部补料
 
 开放来源不够时，默认由用户在外部补充资料，再回到 `2A` 继续收敛。
@@ -103,11 +107,13 @@ Skill 接手后的任务是：
 
 ```bash
 OPENALEX_API_KEY=your_openalex_key
+QIANFAN_API_KEY=your_qianfan_api_key
 ```
 
 规则：
 
 - 需要直接调用 OpenAlex API 时，检查 `OPENALEX_API_KEY` 是否存在。
+- 需要直接调用百度学术 API 时，检查 `QIANFAN_API_KEY` 是否存在。
 - 若缺少 `OPENALEX_API_KEY`，则阶段二应退回到：
   - 用户导出题录
   - DOI / URL 列表
@@ -119,7 +125,7 @@ OPENALEX_API_KEY=your_openalex_key
 阶段二如需重复调用开放 API，不应每次现场重写抓取代码，优先复用 Skill 自带脚本：
 
 - `scripts/stage2a_sources.py`
-  - 负责读取 `.env`、调用 `OpenAlex`、输出归一化 JSON。
+  - 负责读取 `.env`、调用 `OpenAlex` / `百度学术`、输出归一化 JSON。
   - 其中 `openalex-expand` 子命令只负责根据 agent 选定的 `seed_id` 抓取一跳引用结果，供下一轮人工判读。
   - 默认可将过程文件写到 `outputs/<project>/_stage2a/`。
 - `scripts/stage2b_scholarship_map.py`
@@ -149,6 +155,7 @@ OPENALEX_API_KEY=your_openalex_key
 
 ```bash
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
+python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py baidu-scholar --project demo --query "汉代 灾异 诠释" --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex-expand --project demo --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --per-page 10 --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo \
   --source-json outputs/demo/_stage2a/openalex-xxx.json

@@ -57,6 +57,27 @@ class Stage2ScriptsTests(unittest.TestCase):
         self.assertEqual(payload["abstract"], "Rain ritual")
         self.assertEqual(payload["openalex_id"], "W123")
 
+    def test_normalize_baidu_scholar_work_extracts_core_fields(self) -> None:
+        work = {
+            "abstract": "讨论汉代灾异说。",
+            "aiAbstract": "",
+            "doi": "CNKI:SUN:ZSHK.0.1991-03-008",
+            "keyword": "灾异说;儒家经典;董仲舒",
+            "paperId": "paper-123",
+            "publishInfo": {"journalName": "中国社会科学"},
+            "publishYear": 1991,
+            "title": "汉代灾异学说与儒家君道论",
+            "url": "https://xueshu.baidu.com/demo",
+        }
+
+        payload = _STAGE2_SOURCES.normalize_baidu_scholar_work(work)
+
+        self.assertEqual(payload["source"], "baidu-scholar")
+        self.assertEqual(payload["baidu_scholar_id"], "paper-123")
+        self.assertEqual(payload["journal"], "中国社会科学")
+        self.assertEqual(payload["keywords"], ["灾异说", "儒家经典", "董仲舒"])
+        self.assertEqual(payload["landing_page_url"], "https://xueshu.baidu.com/demo")
+
     def test_render_yaml_includes_core_works_and_source_files(self) -> None:
         records = [
             {
