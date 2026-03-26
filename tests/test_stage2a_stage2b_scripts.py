@@ -85,27 +85,8 @@ class Stage2ScriptsTests(unittest.TestCase):
         self.assertIn('work: "Ritual and Rain"', payload)
         self.assertIn('source: "openalex"', payload)
         self.assertIn('    - "openalex-demo.json"', payload)
-
-    def test_normalize_doaj_work_extracts_subjects_and_links(self) -> None:
-        item = {
-            "id": "abc",
-            "bibjson": {
-                "title": "A systematic synthesis and analysis of English-language Shuowen scholarship",
-                "year": "2024",
-                "author": [{"name": "Jane Doe"}],
-                "journal": {"title": "Humanities & Social Sciences Communications"},
-                "identifier": [{"type": "doi", "id": "10.1038/example"}],
-                "link": [{"type": "fulltext", "url": "https://example.org/paper.pdf"}],
-                "subject": [{"term": "Philology"}],
-            },
-        }
-
-        payload = _STAGE2_SOURCES.normalize_doaj_work(item)
-
-        self.assertEqual(payload["doi"], "10.1038/example")
-        self.assertEqual(payload["authors"], ["Jane Doe"])
-        self.assertEqual(payload["keywords"], ["Philology"])
-        self.assertTrue(payload["pdf_url"].endswith(".pdf"))
+        self.assertIn("stage3_handoff:", payload)
+        self.assertIn('    - theme: "ritual"', payload)
 
     def test_expand_openalex_citations_fetches_one_hop_and_dedupes(self) -> None:
         def fake_fetcher(

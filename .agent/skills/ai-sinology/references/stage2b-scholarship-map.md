@@ -5,6 +5,8 @@
 - `1_journal_targeting.md`
 - `1_research_proposal.md`
 - `2A` 已收束的候选作品集与筛选记录
+- `outputs/<project>/_stage2a/candidate_papers.md`
+- `outputs/<project>/_stage2a/papers/` 中人工补入的 PDF、题录导出与笔记
 - 用户提供的参考文献、题录、PDF、DOI / URL 列表或书目
 - 如需选择数据来源与环境变量，进一步参见 `references/stage2a-data-intake.md`
 - 如需稳定复用开放来源抓取，优先调用 `scripts/stage2a_sources.py` 与 `scripts/stage2b_scholarship_map.py`
@@ -17,6 +19,7 @@
 
 - 单独建立“学界怎么讨论这个问题”的结构化地图。
 - 把学术史、争点、可继承路径与不宜越界的论断提前梳理清楚。
+- 产出可直接交给阶段三外部执行器消费的检索 handoff。
 - 为阶段四论纲构建提供二手研究坐标，而不是直接产出 prose 式文献综述。
 
 ## 进入 `2B` 的前提
@@ -73,18 +76,23 @@ usable_frames:
   - "可借用的问题框架或方法"
 claim_boundaries:
   - "当前证据不宜支撑的强论断"
+stage3_handoff:
+  target_themes:
+    - theme: "..."
+      description: "..."
 ```
 
 ## 执行规则
 
 - 数据入口默认按以下优先级处理：
-  - 开放 API：`OpenAlex`、`Crossref`、`DOAJ`
+  - 开放 API：`OpenAlex`
   - 用户导出的题录文件：`RIS`、`BibTeX`、`CSV`
   - 本地 PDF、DOI 列表、文章 URL 列表与人工笔记
 - 如果需要重复执行开放 API 检索，优先把归一化结果写到 `outputs/<project>/_stage2a/`，并把 `manual-intake.md`、`screening-notes.md` 一并视为 `2B` 的输入。
-- 如果阶段一已经形成明确研究方向，agent 应基于 `settled_research_direction`、`idea`、`target_themes` 和 proposal 正文自行拆出多组检索轴，而不是只打一条关键词。
+- `2B` 默认应先读 `candidate_papers.md` 与 `papers/` 目录中的人工补料，再归纳 positions、debates 与 gaps，不要只凭 API 首轮结果起草。
+- 如果阶段一已经形成明确研究方向，agent 应基于 `settled_research_direction`、`idea` 与 proposal 正文自行拆出多组检索轴，而不是只打一条关键词。
 - 优先让 agent 根据当前任务上下文决定检索轮次和 query，而不是把“理解研究方向”硬编码成固定脚本；但这部分工作应尽量在 `2A` 完成，而不是拖到 `2B` 才做。
-- 如果以 `OpenAlex` 为主入口，默认流程应是：先关键词检索，再由 agent 选出值得继续追踪的 works，然后调用 `openalex-expand` 抓取这些 works 引用的文献。
+- 如果以 `OpenAlex` 为主入口，默认流程应是：先关键词检索，再由 agent 选出值得继续追踪的 works，然后调用 `openalex-expand` 抓取这些 works 引用的文献；首轮 `OpenAlex` 后还应做一轮网页补检，但只采纳达到学术引用标准的页面。
 - `openalex-expand` 只负责一跳引用抓取，不负责判断相关性；哪些结果保留、哪些结果进入下一轮、何时停轮，应由 agent 决定。这些属于 `2A` 的判断前提。
 - 优先围绕研究问题、对象、时段、概念去检索，不要只围绕大词检索。
 - 进入 `2B` 后，优先提炼“研究路径”和“争点轴线”，而不是继续无边界扩搜或罗列文献名单。
@@ -95,6 +103,8 @@ claim_boundaries:
   - 与本文直接对话的核心作品
 - `core_works` 与 `major_positions` 必须可回溯到具体作品，不允许抽象归纳后找不到来源。
 - `claim_boundaries` 必须写，防止后面把“有限推进”写成“彻底改写”。
+- `stage3_handoff.target_themes` 必须写，阶段三默认直接消费这一段，而不是回头读取阶段一 front matter。
+- 如果需要，`stage3_handoff` 可以继续补充检索重点、材料类型提示与排除项，但这些都属于可选增强，不是最小契约。
 - 如果目标刊物有明显风格偏好，应在 `target_journals` 和 `usable_frames` 中体现。
 - 阶段二通常应收束到约 30 篇高相关依据文献，但这个数量是 agent 的工作目标，不是脚本自动裁剪的阈值。
 
@@ -111,3 +121,4 @@ claim_boundaries:
 - 读完地图后，能够回答“本文准备回应谁、接续谁、修正谁”。
 - 能清楚看出至少 2 组主要争点，而不是一串并列摘要。
 - 研究缺口与创新边界同时存在，不只有“可写什么”，也有“不能夸什么”。
+- 阶段三执行者只读 `2b_scholarship_map.yaml`，也能明确知道该优先检索什么、不该检索什么。

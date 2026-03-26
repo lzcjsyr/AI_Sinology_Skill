@@ -19,8 +19,8 @@
 2. 先确认投稿目标，再生成 `outputs/<project>/1_journal_targeting.md` 与 `outputs/<project>/1_research_proposal.md`；阶段一结论应明确落成“研究方向 + 投稿期刊”
 3. 用同一个 Skill 推进阶段二，但执行上默认拆成两个子环节：
    `2A` 检索扩展与候选集收敛：agent 先读阶段一，再分多轮调用 `python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py ...`，把开放来源结果、人工补料记录和筛选笔记写到 `outputs/<project>/_stage2a/`
-   `2B` 学术史地图写作：当 `2A` 的候选集已经相对稳定，再按需要用 `python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py ...` 生成骨架，并由 agent 完成 `outputs/<project>/2b_scholarship_map.yaml`
-4. 运行 `python3 -m runtime.stage3.cli`，先选择目标项目，再创建 `outputs/<project>/_stage3/` 工作目录与阶段三配置
+   `2B` 学术史地图写作：当 `2A` 的候选集已经相对稳定，再按需要用 `python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py ...` 生成骨架，并由 agent 完成 `outputs/<project>/2b_scholarship_map.yaml`；该文件同时提供 `stage3_handoff`，作为阶段三正式输入
+4. 运行 `python3 -m runtime.stage3.cli`，先选择目标项目，读取 `2b_scholarship_map.yaml` 中的 `stage3_handoff`，再创建 `outputs/<project>/_stage3/` 工作目录与阶段三配置
 5. 在仓库外部完成阶段三检索；阶段三过程文件统一写入 `outputs/<project>/_stage3/`，最终结果写回 `outputs/<project>/3_final_corpus.yaml`
 6. 继续生成 `outputs/<project>/4_outline_matrix.yaml` 与 `outputs/<project>/4_argument_audit.md`
 7. 再生成 `outputs/<project>/5_first_draft.md`
@@ -55,8 +55,6 @@
 │       ├── 2b_scholarship_map.yaml
 │       ├── _stage2a/
 │       │   ├── openalex-*.json
-│       │   ├── crossref-*.json
-│       │   ├── doaj-*.json
 │       │   ├── manual-intake.md
 │       │   └── screening-notes.md
 │       ├── 3_stage3_manifest.json
@@ -83,11 +81,9 @@ python3 .agent/skills/ai-sinology/scripts/init_project.py demo
 python3 .agent/skills/ai-sinology/scripts/project_status.py --all
 python3 .agent/skills/ai-sinology/scripts/sync_progress.py demo
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py crossref --project demo --query "Han dynasty disaster interpretation" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py doaj --project demo --query "classical chinese philology" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo --source-json outputs/demo/_stage2a/openalex-xxx.json --source-json outputs/demo/_stage2a/crossref-xxx.json
+python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo --source-json outputs/demo/_stage2a/openalex-xxx.json
 python3 -m runtime.stage3.cli
-python3 -m runtime.stage3.cli --project demo --source stage1 --repos KR3j0160,KR3j0161 --env-file .env
+python3 -m runtime.stage3.cli --project demo --source stage2 --repos KR3j0160,KR3j0161 --env-file .env
 python3 -m runtime.stage3.cli --project demo --themes 祈雨,灾异 --scopes KR3j --env-file .env
 python3 -m runtime.stage3.cli --project demo --show-checkpoint
 python3 -m runtime.stage3.cli --project demo --checkpoint-action start --checkpoint-target KR3j0160
@@ -102,6 +98,8 @@ pytest
 `runtime.stage3.cli` 会先选择 `outputs/<project>/` 下的目标项目，再在该项目内创建 `outputs/<project>/_stage3/` 工作目录。阶段三的会话状态与过程文件都会写进这个目录，默认可在中断后继续；同时保留 `outputs/<project>/3_stage3_manifest.json` 作为对外 manifest。
 
 `runtime.stage3.cli`、`runtime.stage3.env_check` 和 `runtime.stage3.api_smoke_test` 默认都会读取当前工作目录下的 `.env`；如果需要切换环境文件，再显式传 `--env-file`。
+
+如果用户对 `KR1a`、`KR2k`、`KR3j` 这类 Kanripo family 不熟悉，可先阅读 `runtime/stage3/docs/kanripo_family_guide.md`。该文档提供静态分类导览、代表文本和本地镜像体量说明，适合在正式选择阶段三 scope 前先建立基本认识。
 
 `outputs/<project>/_stage3/session.json` 现在除了保存主题、scope、repo 等配置，还会保存 `retrieval_progress` 断点信息，包括：
 
@@ -144,7 +142,8 @@ pytest
 
 - 读取 `1_journal_targeting.md` 与 `1_research_proposal.md`
 - 拆出 3 到 8 组检索轴，而不是只打一条 query
-- 用 `OpenAlex` / `Crossref` / `DOAJ` 做首轮检索
+- 用 `OpenAlex` 做首轮检索
+- 首轮 `OpenAlex` 后，再用 agent 自身的网页搜索/浏览能力补检高相关结果
 - 由 agent 根据题名、摘要、刊物、作者、引用关系判断哪些 works 值得保留
 - 由 agent 选出 seed works，并调用 `openalex-expand` 抓一跳引用继续扩展
 - 在开放来源不够时，停下来等待用户补充外部资料
@@ -152,9 +151,12 @@ pytest
 
 `2A` 的推荐过程文件：
 
-- `openalex-*.json` / `crossref-*.json` / `doaj-*.json`
+- `openalex-*.json`
+- `candidate_papers.md`
 - `screening-notes.md`
   用来记录 agent 为什么保留、剔除或继续追踪某条文献链
+- `papers/`
+  用于存放 `2A` 后人工补入的 PDF、题录导出与读书笔记
 
 `2A` 应显式保留人工干预点：
 
@@ -186,10 +188,18 @@ pytest
 
 - 可直接自动处理的开放入口：
   - `OpenAlex`：阶段二默认主 API，用于 works、authors、sources、topics 与引用关系。
-  - `Crossref`：用于 DOI 补全、标准题录、期刊信息与参考文献链补齐。
-  - `DOAJ`：用于开放获取期刊与文章补充。
 - 外部补料：
   - 用户自行补充导出题录、PDF、DOI、URL 或书目笔记
+
+首轮 `OpenAlex` 之后，还应由 agent 使用网页搜索/浏览补检，优先整理：
+
+- 期刊官网
+- DOI 落地页
+- 出版社页面
+- 高校或研究机构知识库
+- 可公开访问的论文数据库落地页
+
+不把普通博客、无稳定出处的转载页或纯聚合搜索结果页直接当作正式依据。
 
 面向这个 Skill 的实践原则是：
 
@@ -202,14 +212,11 @@ pytest
 
 ```bash
 OPENALEX_API_KEY=your_openalex_key
-CROSSREF_MAILTO=your_email@example.com
 ```
 
 说明：
 
 - `OPENALEX_API_KEY`：阶段二如果直接调用 OpenAlex API，应配置此变量。
-- `CROSSREF_MAILTO`：Crossref 公共 REST API 不要求 API Key，但建议带联系邮箱做 polite identification。
-- `DOAJ` 读操作默认不要求 API Key。
 - 其他来源默认按“用户先在外部补充资料，再交给 Skill 继续处理”的模式使用。
 
 更具体的阶段二来源策略见 `./.agent/skills/ai-sinology/references/stage2a-data-intake.md`。
@@ -219,9 +226,7 @@ CROSSREF_MAILTO=your_email@example.com
 ```bash
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex-expand --project demo --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --per-page 10 --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py crossref --project demo --query "Han dynasty disaster interpretation" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py doaj --project demo --query "classical chinese philology" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo --source-json outputs/demo/_stage2a/openalex-xxx.json --source-json outputs/demo/_stage2a/crossref-xxx.json
+python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo --source-json outputs/demo/_stage2a/openalex-xxx.json
 ```
 
 更推荐的阶段二流程是：
@@ -230,9 +235,11 @@ python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project d
 2. 进入 `2A`：由 agent 自主拆出多组检索轴，而不是固定只打一条 query
 3. 先调用 `stage2a_sources.py openalex` 做首轮检索，再由 agent 自己判读哪些 works 值得继续扩展
 4. 对 agent 选中的 seed works 调用 `stage2a_sources.py openalex-expand` 抓一跳引用；脚本不负责判断相关性，也不负责自动停轮
-5. 由 agent 根据每轮结果质量、重复度与偏题程度决定是否继续下一轮；如果开放来源明显不够，就停在 `2A`，等用户补充资料后再继续
-6. 当候选集相对稳定后，进入 `2B`：由 agent 读取返回 JSON 和人工补料，筛掉噪声，抽取 `claim`、`relevance`、`debates`
-7. 最后按需要用 `stage2b_scholarship_map.py` 生成草稿骨架，再由 agent 完成 `2b_scholarship_map.yaml`
+5. 首轮 `OpenAlex` 后，再由 agent 用网页搜索/浏览补检高相关作品，只整理达到学术引用标准的页面
+6. 在 `outputs/<project>/_stage2a/candidate_papers.md` 中持续维护候选论文清单，作为 `2A` 的明确输出
+7. 由 agent 根据每轮结果质量、重复度与偏题程度决定是否继续下一轮；如果开放来源明显不够，就停在 `2A`，等用户把相关 PDF、题录导出和笔记补入 `outputs/<project>/_stage2a/papers/` 后再继续
+8. 当候选集相对稳定后，进入 `2B`：由 agent 读取返回 JSON、`candidate_papers.md` 与 `papers/` 目录中的人工补料，筛掉噪声，抽取 `claim`、`relevance`、`debates`
+9. 最后按需要用 `stage2b_scholarship_map.py` 生成草稿骨架，再由 agent 完成 `2b_scholarship_map.yaml`，并确认其中的 `stage3_handoff` 已足以直接交给阶段三
 
 ## 依赖
 

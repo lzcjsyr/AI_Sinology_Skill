@@ -10,6 +10,7 @@
 - 摘要、关键词、目录或短引文
 - 引用关系与期刊来源信息
 - 足以支持 `major_positions`、`debates`、`gaps_to_address` 的研究线索
+- 一份可继续人工补料的候选论文清单
 
 `2A` 不以批量抓取受限全文为目标。
 
@@ -26,6 +27,7 @@
   - 拆检索轴
   - 判断相关性
   - 选择 seed works
+  - 在首轮 `OpenAlex` 后发起网页搜索补检
   - 决定是否继续下一轮扩展
   - 判断何时停轮
   - 判断何时需要暂停等待用户补料
@@ -45,15 +47,6 @@
   - 适合做阶段二默认主 API。
   - 可用于 works、authors、sources、topics、related works 与 citation graph。
   - 直接 API 模式应配置 `OPENALEX_API_KEY`。
-- `Crossref`
-  - 用于 DOI 补全、标准题录、来源刊物与部分参考文献链补齐。
-  - 公共 REST API 不要求 API Key。
-  - 建议配置 `CROSSREF_MAILTO`，使用 polite identification。
-- `DOAJ`
-  - 用于开放获取期刊与文章补充。
-  - 适合在 humanities 题目里补开源论文与全文链接。
-  - 读操作默认不要求 API Key。
-
 ### 第二层：外部补料
 
 开放来源不够时，默认由用户在外部补充资料，再回到 `2A` 继续收敛。
@@ -74,6 +67,7 @@ Skill 接手后的任务是：
 - 去重与合并版本
 - 补 DOI / 年份 / 刊名 / 作者名
 - 形成候选作品集
+- 生成 `candidate_papers.md`
 - 记录哪些作品值得继续扩展
 - 为进入 `2B` 准备基础材料
 
@@ -86,19 +80,34 @@ Skill 接手后的任务是：
 
 这些入口可以作为人工补漏线索，但不应成为 Skill 的默认数据面。
 
+## 首轮 `OpenAlex` 后的网页补检
+
+首轮 `OpenAlex` 检索后，agent 应再使用自身网页搜索/浏览能力做一轮补检，用来补足题录、摘要、刊物页面与高相关作品线索。
+
+优先接受为正式依据的网页来源：
+
+- 期刊官网与出版社页面
+- DOI 落地页
+- 高校或研究机构知识库
+- 可公开访问的论文数据库落地页
+
+不应把以下页面直接当作正式依据：
+
+- 普通博客
+- 无署名转载页
+- 只做聚合、不提供稳定出处的搜索结果页
+
 ## API Key 与环境变量
 
 推荐在仓库根目录 `.env` 中配置：
 
 ```bash
 OPENALEX_API_KEY=your_openalex_key
-CROSSREF_MAILTO=your_email@example.com
 ```
 
 规则：
 
 - 需要直接调用 OpenAlex API 时，检查 `OPENALEX_API_KEY` 是否存在。
-- 使用 Crossref 时，即便没有 API Key，也应尽量附带 `CROSSREF_MAILTO`。
 - 若缺少 `OPENALEX_API_KEY`，则阶段二应退回到：
   - 用户导出题录
   - DOI / URL 列表
@@ -110,7 +119,7 @@ CROSSREF_MAILTO=your_email@example.com
 阶段二如需重复调用开放 API，不应每次现场重写抓取代码，优先复用 Skill 自带脚本：
 
 - `scripts/stage2a_sources.py`
-  - 负责读取 `.env`、调用 `OpenAlex` / `Crossref` / `DOAJ`、输出归一化 JSON。
+  - 负责读取 `.env`、调用 `OpenAlex`、输出归一化 JSON。
   - 其中 `openalex-expand` 子命令只负责根据 agent 选定的 `seed_id` 抓取一跳引用结果，供下一轮人工判读。
   - 默认可将过程文件写到 `outputs/<project>/_stage2a/`。
 - `scripts/stage2b_scholarship_map.py`
@@ -128,10 +137,11 @@ CROSSREF_MAILTO=your_email@example.com
 `outputs/<project>/_stage2a/` 推荐保留：
 
 - `openalex-*.json`
-- `crossref-*.json`
-- `doaj-*.json`
+- `candidate_papers.md`
 - `screening-notes.md`
   用来简要记录 agent 的筛选与扩展判断
+- `papers/`
+  用于存放用户在 `2A` 后人工补入的 PDF、题录导出与读书笔记
 
 这些都属于过程产物，不替代正式的 `2b_scholarship_map.yaml`。
 
@@ -140,11 +150,8 @@ CROSSREF_MAILTO=your_email@example.com
 ```bash
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex-expand --project demo --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --per-page 10 --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py crossref --project demo --query "Han dynasty disaster interpretation" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py doaj --project demo --query "classical chinese philology" --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo \
-  --source-json outputs/demo/_stage2a/openalex-xxx.json \
-  --source-json outputs/demo/_stage2a/crossref-xxx.json
+  --source-json outputs/demo/_stage2a/openalex-xxx.json
 ```
 
 ## 面向 Skill 的实践决策
@@ -158,12 +165,13 @@ python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project d
    - 时段 + 争点
    - 中英文互译后的主题词
 3. 如果以 `OpenAlex` 为主入口，优先执行“关键词首轮检索 -> agent 判读结果 -> 对选中的 seed works 调用 `openalex-expand` 抓一跳引用 -> 再判读是否继续下一轮”的流程。
-4. `OpenAlex` 扩展的收束目标通常是约 30 篇高相关作品；如果新增结果已经明显衰减、重复度升高或偏题，agent 应主动停轮，不必机械跑满上限。
-5. 脚本只负责稳定取数、字段归一化和过程落盘；哪些作品相关、哪些作品值得进入下一轮，必须由 agent 结合摘要、题名、期刊与上下文判断。
-6. 用 `OpenAlex + Crossref + DOAJ` 建立开放候选集，并把 JSON 过程文件写到 `outputs/<project>/_stage2a/`。
-7. 如果开放来源明显不够，停在 `2A`，等待用户补充外部资料。
-8. 用户补料后，由 agent 继续筛选、补链和收束。
-9. 当候选集已经足够稳定时，再进入 `2B`，而不是在 `2A` 里直接写完整 scholarship map。
+4. 首轮 `OpenAlex` 后，再由 agent 用网页搜索/浏览补检高相关结果，优先核对期刊官网、DOI 落地页、出版社页面与机构知识库。
+5. `OpenAlex` 扩展的收束目标通常是约 30 篇高相关作品；如果新增结果已经明显衰减、重复度升高或偏题，agent 应主动停轮，不必机械跑满上限。
+6. 脚本只负责稳定取数、字段归一化和过程落盘；哪些作品相关、哪些作品值得进入下一轮，必须由 agent 结合摘要、题名、期刊与上下文判断。
+7. 用 `OpenAlex` 建立开放候选集，并把 JSON 过程文件写到 `outputs/<project>/_stage2a/`；同时维护 `candidate_papers.md`。
+8. 如果开放来源明显不够，停在 `2A`，等待用户补充外部资料。
+9. 用户补料后，把 PDF、题录导出和读书笔记放入 `outputs/<project>/_stage2a/papers/`，再由 agent 继续筛选、补链和收束。
+10. 当候选集已经足够稳定时，再进入 `2B`，而不是在 `2A` 里直接写完整 scholarship map。
 
 ## 人工干预点
 

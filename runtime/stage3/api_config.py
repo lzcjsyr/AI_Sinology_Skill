@@ -1,3 +1,5 @@
+"""Stage3 外部运行时的模型槽位、API 环境变量和请求参数组装。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

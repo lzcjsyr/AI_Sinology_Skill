@@ -1,3 +1,5 @@
+"""对 Stage3 各模型槽位执行最小化 API 连通性自检。"""
+
 from __future__ import annotations
 
 import argparse

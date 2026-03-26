@@ -1,3 +1,5 @@
+"""检查 Stage3 外部运行时依赖、Kanripo 数据目录和 API 配置是否就绪。"""
+
 from __future__ import annotations
 
 import argparse

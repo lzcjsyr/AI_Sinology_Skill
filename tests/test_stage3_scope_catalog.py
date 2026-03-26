@@ -34,7 +34,7 @@ class Stage3ScopeCatalogTests(unittest.TestCase):
 
             options = list_available_scope_options(root)
 
-        self.assertEqual(options[0].code, "KR3j0160")
+        self.assertEqual(options[0].code, "KR3j")
         self.assertEqual(options[0].section, "未分类")
 
 

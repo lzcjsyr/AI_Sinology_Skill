@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # Fetch normalized Stage 2 source data from public scholarly APIs.
 # This script is deliberately limited to deterministic work:
-# reading env vars, calling OpenAlex / Crossref / DOAJ,
+# reading env vars, calling OpenAlex,
 # normalizing fields, and writing JSON artifacts for later agent review.
 
 import argparse
@@ -10,15 +10,13 @@ from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from stage2_common import dump_json, ensure_stage2a_dir, merged_env, now_iso, slugify
 
 
 OPENALEX_ENDPOINT = "https://api.openalex.org/works"
-CROSSREF_ENDPOINT = "https://api.crossref.org/works"
-DOAJ_ENDPOINT = "https://doaj.org/api/search/articles"
 DEFAULT_TIMEOUT = 30
 OpenAlexFetcher = Callable[..., tuple[dict[str, str | int], list[dict[str, Any]]]]
 
@@ -50,25 +48,6 @@ def build_openalex_params(
     return params
 
 
-def build_crossref_params(
-    *,
-    query: str,
-    rows: int,
-    mailto: str = "",
-) -> dict[str, str | int]:
-    params: dict[str, str | int] = {
-        "query.bibliographic": query,
-        "rows": rows,
-    }
-    if mailto:
-        params["mailto"] = mailto
-    return params
-
-
-def build_doaj_params(*, page_size: int) -> dict[str, int]:
-    return {"pageSize": page_size}
-
-
 def fetch_json(endpoint: str, params: dict[str, str | int]) -> dict[str, Any]:
     query_string = urlencode(params)
     request = Request(
@@ -80,24 +59,6 @@ def fetch_json(endpoint: str, params: dict[str, str | int]) -> dict[str, Any]:
     )
     with urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
         return json.loads(response.read().decode("utf-8"))
-
-
-def fetch_doaj_json(query: str, page_size: int) -> dict[str, Any]:
-    encoded_query = urlencode(build_doaj_params(page_size=page_size))
-    target = f"{DOAJ_ENDPOINT}/{quote_query(query)}?{encoded_query}"
-    request = Request(
-        target,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "ai-sinology-stage2/1.0",
-        },
-    )
-    with urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def quote_query(query: str) -> str:
-    return quote(query, safe="")
 
 
 def short_openalex_id(value: str | None) -> str:
@@ -165,78 +126,6 @@ def normalize_openalex_work(work: dict[str, Any]) -> dict[str, Any]:
         "related_works": [short_openalex_id(item) for item in work.get("related_works", []) if short_openalex_id(item)],
         "cited_by_api_url": str(work.get("cited_by_api_url", "")).strip(),
         "openalex_relevance_score": work.get("relevance_score"),
-    }
-
-
-def normalize_crossref_work(item: dict[str, Any]) -> dict[str, Any]:
-    authors: list[str] = []
-    for author in item.get("author", []):
-        given = str(author.get("given", "")).strip()
-        family = str(author.get("family", "")).strip()
-        full_name = " ".join(part for part in (given, family) if part).strip()
-        if full_name:
-            authors.append(full_name)
-    title = ""
-    if item.get("title"):
-        title = str(item["title"][0]).strip()
-    abstract = str(item.get("abstract", "")).replace("<jats:p>", "").replace("</jats:p>", "").strip()
-    issued = item.get("issued", {}).get("date-parts", [[]])
-    year = issued[0][0] if issued and issued[0] else None
-    container = item.get("container-title", [])
-    return {
-        "source": "crossref",
-        "id": item.get("DOI", ""),
-        "doi": item.get("DOI", ""),
-        "title": title,
-        "year": year,
-        "type": item.get("type", ""),
-        "authors": authors,
-        "journal": str(container[0]).strip() if container else "",
-        "abstract": abstract,
-        "cited_by_count": item.get("is-referenced-by-count", 0),
-        "landing_page_url": item.get("URL", ""),
-        "pdf_url": "",
-    }
-
-
-def normalize_doaj_work(item: dict[str, Any]) -> dict[str, Any]:
-    bib = item.get("bibjson") or {}
-    journal = bib.get("journal") or {}
-    authors = [str(author.get("name", "")).strip() for author in bib.get("author", []) if author.get("name")]
-    abstract = str(bib.get("abstract", "")).strip()
-    title = str(bib.get("title", "")).strip()
-    year = bib.get("year")
-    identifiers = bib.get("identifier", []) or []
-    doi = ""
-    for identifier in identifiers:
-        if str(identifier.get("type", "")).lower() == "doi":
-            doi = str(identifier.get("id", "")).strip()
-            break
-    links = bib.get("link", []) or []
-    landing_page_url = ""
-    pdf_url = ""
-    for link in links:
-        link_type = str(link.get("type", "")).lower()
-        link_url = str(link.get("url", "")).strip()
-        if not landing_page_url and link_url:
-            landing_page_url = link_url
-        if not pdf_url and ("pdf" in link_type or link_url.lower().endswith(".pdf")):
-            pdf_url = link_url
-    subjects = [str(subject.get("term", "")).strip() for subject in bib.get("subject", []) if subject.get("term")]
-    return {
-        "source": "doaj",
-        "id": item.get("id", ""),
-        "doi": doi,
-        "title": title,
-        "year": year,
-        "type": "journal-article",
-        "authors": authors,
-        "journal": str(journal.get("title", "")).strip(),
-        "abstract": abstract,
-        "cited_by_count": 0,
-        "landing_page_url": landing_page_url,
-        "pdf_url": pdf_url,
-        "keywords": subjects,
     }
 
 
@@ -352,23 +241,6 @@ def fetch_openalex_records(
     return params, [normalize_openalex_work(item) for item in raw.get("results", [])]
 
 
-def fetch_crossref_records(
-    *,
-    query: str,
-    rows: int,
-    mailto: str = "",
-) -> tuple[dict[str, str | int], list[dict[str, Any]]]:
-    params = build_crossref_params(query=query, rows=rows, mailto=mailto)
-    raw = fetch_json(CROSSREF_ENDPOINT, params)
-    return params, [normalize_crossref_work(item) for item in raw.get("message", {}).get("items", [])]
-
-
-def fetch_doaj_records(*, query: str, page_size: int) -> tuple[dict[str, int], list[dict[str, Any]]]:
-    params = build_doaj_params(page_size=page_size)
-    raw = fetch_doaj_json(query, page_size)
-    return params, [normalize_doaj_work(item) for item in raw.get("results", [])]
-
-
 def expand_openalex_citations(
     *,
     query: str,
@@ -458,7 +330,7 @@ def build_parser() -> argparse.ArgumentParser:
     openalex.add_argument("--per-page", type=int, default=25, help="每页条数。")
     openalex.add_argument("--page", type=int, default=1, help="页码。")
     openalex.add_argument("--filter", default="", help="OpenAlex filter 表达式。")
-    openalex.add_argument("--mailto", default="", help="显式覆盖 CROSSREF_MAILTO / polite identification。")
+    openalex.add_argument("--mailto", default="", help="显式覆盖 polite identification。")
     openalex.add_argument("--api-key", default="", help="显式覆盖 OPENALEX_API_KEY。")
 
     openalex_expand = subparsers.add_parser("openalex-expand", help="基于 agent 选定的 seed works，抓取这些 works 引用的文献。")
@@ -468,17 +340,8 @@ def build_parser() -> argparse.ArgumentParser:
     openalex_expand.add_argument("--per-page", type=int, default=10, help="每个 seed 展开的引用条数。")
     openalex_expand.add_argument("--page", type=int, default=1, help="OpenAlex 引用结果页码。")
     openalex_expand.add_argument("--round-index", type=int, default=1, help="当前是第几轮扩展，由 agent 维护。")
-    openalex_expand.add_argument("--mailto", default="", help="显式覆盖 CROSSREF_MAILTO / polite identification。")
+    openalex_expand.add_argument("--mailto", default="", help="显式覆盖 polite identification。")
     openalex_expand.add_argument("--api-key", default="", help="显式覆盖 OPENALEX_API_KEY。")
-
-    crossref = subparsers.add_parser("crossref", help="从 Crossref 抓取 works。")
-    crossref.add_argument("--query", required=True, help="检索词。")
-    crossref.add_argument("--rows", type=int, default=25, help="返回条数。")
-    crossref.add_argument("--mailto", default="", help="显式覆盖 CROSSREF_MAILTO。")
-
-    doaj = subparsers.add_parser("doaj", help="从 DOAJ 抓取开放获取文章。")
-    doaj.add_argument("--query", required=True, help="检索词。")
-    doaj.add_argument("--page-size", type=int, default=25, help="返回条数。")
 
     return parser
 
@@ -493,33 +356,8 @@ def main() -> int:
             per_page=args.per_page,
             page=args.page,
             filter_expr=args.filter,
-            mailto=args.mailto or env.get("CROSSREF_MAILTO", ""),
+            mailto=args.mailto,
             api_key=args.api_key or env.get("OPENALEX_API_KEY", ""),
-        )
-        payload = {
-            "provider": args.provider,
-            "query": args.query,
-            "retrieved_at": now_iso(),
-            "params": params,
-            "record_count": len(records),
-            "records": records,
-        }
-    elif args.provider == "openalex-expand":
-        payload = expand_openalex_citations(
-            query=args.query,
-            seed_ids=args.seed_id,
-            per_page=args.per_page,
-            page=args.page,
-            round_index=args.round_index,
-            filter_expr=args.filter,
-            mailto=args.mailto or env.get("CROSSREF_MAILTO", ""),
-            api_key=args.api_key or env.get("OPENALEX_API_KEY", ""),
-        )
-    elif args.provider == "crossref":
-        params, records = fetch_crossref_records(
-            query=args.query,
-            rows=args.rows,
-            mailto=args.mailto or env.get("CROSSREF_MAILTO", ""),
         )
         payload = {
             "provider": args.provider,
@@ -530,18 +368,16 @@ def main() -> int:
             "records": records,
         }
     else:
-        params, records = fetch_doaj_records(
+        payload = expand_openalex_citations(
             query=args.query,
-            page_size=args.page_size,
+            seed_ids=args.seed_id,
+            per_page=args.per_page,
+            page=args.page,
+            round_index=args.round_index,
+            filter_expr=args.filter,
+            mailto=args.mailto,
+            api_key=args.api_key or env.get("OPENALEX_API_KEY", ""),
         )
-        payload = {
-            "provider": args.provider,
-            "query": args.query,
-            "retrieved_at": now_iso(),
-            "params": params,
-            "record_count": len(records),
-            "records": records,
-        }
 
     output_path = Path(args.output).expanduser().resolve() if args.output else default_output_path(
         provider=args.provider,

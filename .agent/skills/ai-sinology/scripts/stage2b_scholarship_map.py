@@ -122,6 +122,28 @@ def summarize_claim(record: dict[str, Any]) -> str:
     return PLACEHOLDER
 
 
+def infer_stage3_themes(*, keywords: list[str], research_question: str) -> list[dict[str, str]]:
+    candidates: list[str] = []
+    for item in keywords:
+        normalized = str(item).strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+
+    if not candidates and research_question.strip():
+        candidates.append(research_question.strip()[:24])
+
+    if not candidates:
+        candidates.append("待补阶段三检索主题")
+
+    return [
+        {
+            "theme": item,
+            "description": f"围绕“{item}”检索与当前研究问题直接相关的一手材料。",
+        }
+        for item in candidates[:5]
+    ]
+
+
 def core_work_lines(records: list[dict[str, Any]]) -> list[str]:
     if not records:
         return [
@@ -173,6 +195,10 @@ def render_yaml(
     records: list[dict[str, Any]],
     period_hint: str,
 ) -> str:
+    stage3_themes = infer_stage3_themes(
+        keywords=keywords,
+        research_question=research_question,
+    )
     lines = [
         f"research_question: {yaml_quote(research_question or PLACEHOLDER)}",
         "target_journals:",
@@ -211,9 +237,18 @@ def render_yaml(
             f"  - {yaml_quote('待从阶段二核心文献中归纳的问题框架或方法')}",
             "claim_boundaries:",
             f"  - {yaml_quote('当前证据暂不支持“首次”“填补空白”“彻底改写通说”等强论断')}",
-            f"generated_at: {yaml_quote(now_iso())}",
+            "stage3_handoff:",
+            "  target_themes:",
         ]
     )
+    for item in stage3_themes:
+        lines.extend(
+            [
+                f"    - theme: {yaml_quote(item['theme'])}",
+                f"      description: {yaml_quote(item['description'])}",
+            ]
+        )
+    lines.append(f"generated_at: {yaml_quote(now_iso())}")
     lines.append("")
     return "\n".join(lines)
 

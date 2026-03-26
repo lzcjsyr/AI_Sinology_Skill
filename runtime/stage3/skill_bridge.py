@@ -1,3 +1,5 @@
+"""桥接 skill 内部 workspace_contract，供 Stage3 外部运行时代码复用。"""
+
 from __future__ import annotations
 
 from importlib.util import module_from_spec, spec_from_file_location

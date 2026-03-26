@@ -10,10 +10,10 @@
     },
     {
       "index": 2,
-      "name": "2A检索收敛与2B学术史地图",
+      "name": "2A检索收敛、2B学术史地图与阶段三交接",
       "required_all": ["2b_scholarship_map.yaml"],
       "required_any": [],
-      "recommended": ["_stage2a"]
+      "recommended": ["_stage2a", "_stage2a/candidate_papers.md", "_stage2a/papers"]
     },
     {
       "index": 3,

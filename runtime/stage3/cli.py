@@ -1,3 +1,5 @@
+"""提供 Stage3 外部入口，负责确认调研范围并写入 manifest / session。"""
+
 from __future__ import annotations
 
 import argparse
@@ -5,22 +7,17 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .catalog import list_available_scope_options
+from .catalog import measure_corpus_overview, resolve_analysis_targets
 from .session import (
-    ProposalContext,
-    ThemeItem,
+    Stage3Context,
     analysis_targets_from_session,
     build_stage3_manifest,
     ensure_stage3_workspace,
-    load_proposal_context,
+    load_stage3_context,
     load_stage3_session,
-    normalize_stage3_session,
-    resolve_scope_selection,
     save_stage3_session,
-    split_csv,
     stage3_session_path,
     stage3_workspace_dir,
-    stage3_workspace_manifest_path,
     summarize_retrieval_progress,
     update_stage3_session_checkpoint,
     write_stage3_manifest,
@@ -30,11 +27,20 @@ from .skill_bridge import inspect_project, list_projects
 
 DEFAULT_KANRIPO_ROOT = "data/kanripo_repos"
 DEFAULT_ENV_FILE = ".env"
+SKILL_REFERENCES_DIR = (
+    Path(__file__).resolve().parent.parent.parent
+    / ".agent"
+    / "skills"
+    / "ai-sinology"
+    / "references"
+)
+STAGE3_GUIDE_PATH = SKILL_REFERENCES_DIR / "stage3-handoff.md"
+WORKSPACE_CONTRACT_PATH = SKILL_REFERENCES_DIR / "workspace-contract.md"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="交互式生成阶段三任务配置；会先选择项目，创建 outputs/<project>/_stage3/ 工作目录，并写入 outputs/<project>/3_stage3_manifest.json。"
+        description="确认阶段三调研范围，统计正文规模，并写入 outputs/<project>/3_stage3_manifest.json。"
     )
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
     parser.add_argument("--project", help="输出目录下的项目名。")
@@ -44,25 +50,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Kanripo 根目录，默认是 ./data/kanripo_repos。",
     )
     parser.add_argument(
-        "--source",
-        choices=("stage1", "manual"),
-        help="分析主题来源：stage1=读取 1_research_proposal.md，manual=手工输入。",
+        "--targets",
+        help="直接指定 analysis_targets，支持 KR1a / KR1a0001，逗号或空格分隔。",
     )
-    parser.add_argument("--themes", help="手工输入分析主题，逗号分隔。")
-    parser.add_argument("--scopes", help="阶段三 scope family，逗号分隔，如 KR1a,KR3j。")
-    parser.add_argument("--repos", help="精确 repo 目录，逗号分隔，如 KR3j0160,KR3j0161。")
     parser.add_argument(
         "--env-file",
-        help="可选 .env 文件路径；默认读取当前工作目录下的 .env，并将结果写入模型槽位摘要。",
+        help="可选 .env 文件路径；默认读取当前工作目录下的 .env，并写入模型槽位摘要。",
     )
-    parser.add_argument("--interactive", action="store_true", help="即使传参完整，也强制进入交互模式。")
     parser.add_argument("--no-write", action="store_true", help="只预览 manifest，不写文件。")
     parser.add_argument(
         "--checkpoint-action",
         choices=("start", "checkpoint", "pause", "complete", "reset"),
         help="直接更新 outputs/<project>/_stage3/session.json 中的检索断点，不重新进入配置流程。",
     )
-    parser.add_argument("--checkpoint-target", help="断点操作对应的当前检索目标，如 KR3j 或 KR3j0160。")
+    parser.add_argument("--checkpoint-target", help="断点操作对应的当前检索目标，如 KR1a 或 KR1a0157。")
     parser.add_argument("--checkpoint-cursor", help="当前检索游标或批次标记。")
     parser.add_argument("--checkpoint-piece-id", help="最近一次确认的 piece_id。")
     parser.add_argument(
@@ -77,13 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _format_theme(item: ThemeItem) -> str:
-    if item.description:
-        return f"{item.theme} | {item.description}"
-    return item.theme
-
-
-def _prompt(message: str, *, default: str | None = None, allow_empty: bool = False) -> str:
+def _prompt(message: str, *, default: str | None = None) -> str:
     prompt = message
     if default:
         prompt += f" [{default}]"
@@ -94,234 +89,124 @@ def _prompt(message: str, *, default: str | None = None, allow_empty: bool = Fal
             return value
         if default is not None:
             return default
-        if allow_empty:
-            return ""
         print("输入不能为空，请重试。")
 
 
-def _prompt_menu(title: str, options: list[tuple[str, str]], *, default: str | None = None) -> str:
-    print()
-    print(title)
-    for key, label in options:
-        print(f"  {key}. {label}")
-    valid = {key for key, _ in options}
+def _confirm(message: str, *, default: bool = True) -> bool:
+    suffix = " [Y/n]: " if default else " [y/N]: "
     while True:
-        suffix = f" [{default}]" if default else ""
-        value = input(f"请选择编号{suffix}: ").strip()
-        if not value and default in valid:
+        value = input(message + suffix).strip().lower()
+        if not value:
             return default
-        if value in valid:
-            return value
-        print(f"无效输入，可选值: {', '.join(sorted(valid))}")
-
-
-def _prompt_index_selection(
-    items: list[str],
-    *,
-    allow_all: bool = True,
-    default: list[int] | None = None,
-) -> list[int]:
-    for index, item in enumerate(items, start=1):
-        print(f"  {index}. {item}")
-    hint = "输入编号，逗号分隔"
-    if allow_all:
-        hint += "；直接回车表示全选"
-    elif default:
-        hint += f"；直接回车沿用 {','.join(str(item) for item in default)}"
-    hint += ": "
-    while True:
-        raw_value = input(hint).strip()
-        if not raw_value and allow_all:
-            return list(range(1, len(items) + 1))
-        if not raw_value and default:
-            return default
-
-        result: list[int] = []
-        invalid = False
-        for token in split_csv(raw_value):
-            if not token.isdigit():
-                invalid = True
-                break
-            index = int(token)
-            if index < 1 or index > len(items):
-                invalid = True
-                break
-            if index not in result:
-                result.append(index)
-        if result and not invalid:
-            return result
-        print("编号无效，请重试。")
-
-
-def _theme_items_from_payload(payload: object) -> list[ThemeItem]:
-    if not isinstance(payload, list):
-        return []
-    items: list[ThemeItem] = []
-    for raw in payload:
-        if isinstance(raw, dict):
-            theme = str(raw.get("theme") or "").strip()
-            description = str(raw.get("description") or "").strip()
-        else:
-            theme = str(raw).strip()
-            description = ""
-        if theme:
-            items.append(ThemeItem(theme=theme, description=description))
-    return items
-
-
-def _theme_names(items: list[ThemeItem]) -> list[str]:
-    return [item.theme for item in items]
-
-
-def _theme_payload(items: list[ThemeItem]) -> list[dict[str, str]]:
-    return [{"theme": item.theme, "description": item.description} for item in items]
-
-
-def _default_theme_indexes(options: tuple[ThemeItem, ...], existing: list[ThemeItem]) -> list[int]:
-    if not existing:
-        return []
-    existing_names = set(_theme_names(existing))
-    return [index for index, item in enumerate(options, start=1) if item.theme in existing_names]
+        if value in {"y", "yes"}:
+            return True
+        if value in {"n", "no"}:
+            return False
+        print("请输入 y 或 n。")
 
 
 def _pick_project(outputs_root: Path) -> str:
     projects = list_projects(outputs_root)
     if not projects:
-        raise SystemExit("outputs/ 下没有项目。请先通过 Skill 创建项目并生成阶段一产物。")
-
-    rows: list[str] = []
-    for project_name in projects:
-        status = inspect_project(outputs_root, project_name)
-        proposal_ready = "有 proposal" if status.stages[0].status != "missing" else "无 proposal"
-        rows.append(
-            f"{project_name} | 下一阶段={status.next_stage} | 已完成到阶段={status.highest_completed_stage} | {proposal_ready}"
-        )
+        raise SystemExit("outputs/ 下没有项目。请先通过 Skill 创建项目并完成阶段二产物。")
 
     print()
     print("可用项目:")
-    indexes = _prompt_index_selection(rows, allow_all=False)
-    return projects[indexes[0] - 1]
-
-
-def _choose_theme_source(
-    proposal_context: ProposalContext | None,
-    *,
-    default_source: str | None = None,
-    default_themes: list[ThemeItem] | None = None,
-) -> tuple[str, list[ThemeItem]]:
-    if proposal_context and proposal_context.target_themes:
-        menu_default = "1" if default_source == "stage1" else "2"
-        choice = _prompt_menu(
-            "请选择阶段三分析主题来源",
-            [
-                ("1", "使用阶段一 1_research_proposal.md 中的 target_themes"),
-                ("2", "手工输入本次阶段三要分析的主题"),
-            ],
-            default=menu_default,
+    for index, project_name in enumerate(projects, start=1):
+        status = inspect_project(outputs_root, project_name)
+        print(
+            f"  {index}. {project_name}"
+            f" | 下一阶段={status.next_stage}"
+            f" | 已完成到阶段={status.highest_completed_stage}"
         )
-        if choice == "1":
-            print()
-            print("proposal 中检测到以下主题:")
-            selected_indexes = _prompt_index_selection(
-                [_format_theme(item) for item in proposal_context.target_themes],
-                default=_default_theme_indexes(proposal_context.target_themes, default_themes or []) or None,
-            )
-            return (
-                "stage1",
-                [proposal_context.target_themes[index - 1] for index in selected_indexes],
-            )
 
-    raw_themes = _prompt(
-        "请输入要分析的主题，逗号分隔",
-        default=",".join(_theme_names(default_themes or [])) or None,
-    )
-    return (
-        "manual",
-        [ThemeItem(theme=item) for item in split_csv(raw_themes)],
-    )
-
-
-def _prompt_scope_inputs(
-    kanripo_root: Path,
-    *,
-    default_scopes: list[str] | None = None,
-    default_repos: list[str] | None = None,
-) -> tuple[list[str], list[str]]:
-    options = list_available_scope_options(kanripo_root)
-    if options:
-        print()
-        print("Kanripo scope family 示例:")
-        for option in options[:12]:
-            print(f"  - {option.code}: {option.display_label}")
-        if len(options) > 12:
-            print("  - ... 可继续手工输入更多 scope family。")
-
-    print()
-    print("至少提供一种检索目标：scope family 或精确 repo 目录。")
+    valid_indexes = {str(index): project for index, project in enumerate(projects, start=1)}
     while True:
-        raw_scopes = _prompt(
-            "输入 scope family，逗号分隔；没有可直接回车",
-            default=",".join(default_scopes or []) or None,
-            allow_empty=True,
-        )
-        raw_repos = _prompt(
-            "输入精确 repo 目录，逗号分隔；没有可直接回车",
-            default=",".join(default_repos or []) or None,
-            allow_empty=True,
-        )
-        scopes = split_csv(raw_scopes)
-        repos = split_csv(raw_repos)
-        if scopes or repos:
-            return scopes, repos
-        print("至少输入一个 scope family 或 repo 目录。")
+        selected = input("请选择项目编号: ").strip()
+        if selected in valid_indexes:
+            return valid_indexes[selected]
+        print(f"无效输入，可选值: {', '.join(valid_indexes.keys())}")
 
 
-def _resolve_project_context(outputs_root: Path, project_name: str) -> tuple[Path, ProposalContext | None]:
+def _resolve_project(outputs_root: Path, project_name: str) -> tuple[Path, Stage3Context]:
     project_dir = outputs_root / project_name
     if not project_dir.exists():
         raise SystemExit(f"项目不存在: {project_dir}")
-    return project_dir, load_proposal_context(project_dir)
 
-
-def _base_session_payload(project_dir: Path, proposal_context: ProposalContext | None) -> dict[str, Any]:
-    return {
-        "session_version": 2,
-        "status": "project_selected",
-        "project_name": project_dir.name,
-        "project_dir": str(project_dir),
-        "stage3_workspace_dir": str(stage3_workspace_dir(project_dir)),
-        "proposal_path": str(proposal_context.proposal_path) if proposal_context else "",
-        "idea": proposal_context.idea if proposal_context else "",
-    }
-
-
-def _manifest_session_fields(manifest: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "kanripo_root": Path(str(manifest["kanripo_root"])),
-        "theme_source": str(manifest["theme_source"]),
-        "target_themes": _theme_items_from_payload(manifest["target_themes"]),
-        "scope_families": [str(item) for item in manifest["scope_families"]],
-        "repo_dirs": [str(item) for item in manifest["repo_dirs"]],
-    }
-
-
-def _runtime_payload(
-    *,
-    manifest: dict[str, Any],
-    project_dir: Path,
-    stage3_dir: Path,
-    session_data: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "manifest": manifest,
-        "project_dir": project_dir,
-        "stage3_dir": stage3_dir,
-        "session_data": session_data,
-    }
+    stage3_context = load_stage3_context(project_dir)
+    if stage3_context is None:
+        raise SystemExit(f"缺少阶段二交接文件: {project_dir / '2b_scholarship_map.yaml'}")
+    if not stage3_context.target_themes:
+        raise SystemExit("stage3_handoff.target_themes 为空，无法启动阶段三。")
+    return project_dir, stage3_context
 
 
 def _resolved_env_file(raw_env_file: str | None) -> str:
     return raw_env_file or DEFAULT_ENV_FILE
+
+
+def _print_intro(project_dir: Path, stage3_context: Stage3Context, kanripo_root: Path) -> None:
+    print()
+    print("阶段三将直接读取 stage2 handoff，不再提供交互清单。")
+    print("请先阅读 guide 或底层契约，确认本次要覆盖的 Kanripo 范围后，再输入 analysis_targets。")
+    print(f"guide: {STAGE3_GUIDE_PATH}")
+    print(f"底层契约: {WORKSPACE_CONTRACT_PATH}")
+    print(f"项目目录: {project_dir}")
+    print(f"Kanripo 根目录: {kanripo_root}")
+    print(f"研究问题: {stage3_context.research_question or '(未填写)'}")
+    print("阶段二 handoff 主题:")
+    for item in stage3_context.target_themes:
+        if item.description:
+            print(f"  - {item.theme} | {item.description}")
+        else:
+            print(f"  - {item.theme}")
+
+
+def _print_selection_errors(issues: tuple[Any, ...]) -> None:
+    print()
+    print("输入有误，请修正以下目标后重新输入：")
+    for issue in issues:
+        print(f"  - {issue.token}: {issue.detail}")
+
+
+def _print_corpus_overview(overview: Any) -> None:
+    print()
+    print("调研范围统计（正文字符数仅供预估工作量使用）:")
+    for item in overview.targets:
+        level_label = "类目" if item.level == "family" else "目录"
+        print(
+            f"  - {item.token} [{level_label}]"
+            f" | 目录 {item.repo_dir_count}"
+            f" | 文本 {item.text_file_count}"
+            f" | 正文约 {item.text_char_count} 字"
+        )
+    print(
+        f"合计 | 目录 {overview.repo_dir_count}"
+        f" | 文本 {overview.text_file_count}"
+        f" | 正文约 {overview.text_char_count} 字"
+    )
+
+
+def _prompt_analysis_targets(kanripo_root: Path, *, default_targets: list[str] | None = None) -> tuple[list[str], dict[str, object]]:
+    default_value = " ".join(default_targets or []) or None
+    while True:
+        raw_targets = _prompt(
+            "请输入调研范围（支持 KR1a / KR1a0001，逗号或空格分隔）",
+            default=default_value,
+        )
+        selection = resolve_analysis_targets(kanripo_root, raw_input=raw_targets)
+        if not selection.tokens:
+            print("至少输入一个调研范围。")
+            continue
+        if selection.issues:
+            _print_selection_errors(selection.issues)
+            continue
+
+        overview = measure_corpus_overview(kanripo_root, selection)
+        _print_corpus_overview(overview)
+        if _confirm("确认以上调研范围无误，并开始阶段三研究吗？", default=True):
+            return list(selection.analysis_targets), overview.as_dict()
+        default_value = " ".join(selection.analysis_targets)
 
 
 def _session_snapshot_payload(project_dir: Path, session_data: dict[str, Any]) -> dict[str, Any]:
@@ -337,49 +222,15 @@ def _session_snapshot_payload(project_dir: Path, session_data: dict[str, Any]) -
     }
 
 
-def _save_progress(
-    project_dir: Path,
-    *,
-    session_data: dict[str, Any],
-    status: str,
-    kanripo_root: Path | None = None,
-    theme_source: str | None = None,
-    target_themes: list[ThemeItem] | None = None,
-    scope_families: list[str] | None = None,
-    repo_dirs: list[str] | None = None,
-    manifest_output_path: Path | None = None,
-) -> Path:
-    payload = dict(session_data)
-    payload["status"] = status
-    optional_fields = {
-        "kanripo_root": str(kanripo_root) if kanripo_root is not None else None,
-        "theme_source": theme_source,
-        "target_themes": _theme_payload(target_themes) if target_themes is not None else None,
-        "scope_families": list(scope_families) if scope_families is not None else None,
-        "repo_dirs": list(repo_dirs) if repo_dirs is not None else None,
-    }
-    payload.update({key: value for key, value in optional_fields.items() if value is not None})
-    if manifest_output_path is not None:
-        payload["manifest_path"] = str(manifest_output_path)
-        payload["workspace_manifest_path"] = str(stage3_workspace_manifest_path(project_dir))
-    payload = normalize_stage3_session(payload)
-    return save_stage3_session(project_dir, payload)
-
-
-def _checkpoint_summary_payload(project_dir: Path) -> dict[str, Any]:
-    session_data = load_stage3_session(project_dir)
-    return _session_snapshot_payload(project_dir, session_data)
-
-
 def _handle_checkpoint_command(args: argparse.Namespace, outputs_root: Path) -> int:
     if not args.project:
         raise SystemExit("checkpoint 模式必须提供 --project。")
 
-    project_dir, _ = _resolve_project_context(outputs_root, args.project)
+    project_dir, _ = _resolve_project(outputs_root, args.project)
     ensure_stage3_workspace(project_dir)
 
     if args.show_checkpoint:
-        payload = _checkpoint_summary_payload(project_dir)
+        payload = _session_snapshot_payload(project_dir, load_stage3_session(project_dir))
     else:
         try:
             session_data = update_stage3_session_checkpoint(
@@ -408,169 +259,47 @@ def _handle_checkpoint_command(args: argparse.Namespace, outputs_root: Path) -> 
     return 0
 
 
-def _non_interactive_payload(args: argparse.Namespace, outputs_root: Path) -> dict[str, Any]:
-    if not args.project:
-        raise SystemExit("非交互模式必须提供 --project。")
-
-    project_dir, proposal_context = _resolve_project_context(outputs_root, args.project)
-    stage3_dir = ensure_stage3_workspace(project_dir)
-    session_data = _base_session_payload(project_dir, proposal_context)
-
-    if args.themes and args.source == "stage1":
-        raise SystemExit("--source stage1 与 --themes 不能同时使用。")
-
-    if args.themes:
-        theme_source = "manual"
-        target_themes = [ThemeItem(theme=item) for item in split_csv(args.themes)]
-    elif args.source == "manual":
-        raise SystemExit("--source manual 时必须同时提供 --themes。")
-    else:
-        if not proposal_context or not proposal_context.target_themes:
-            raise SystemExit("当前项目缺少可读取的阶段一 target_themes，请改用 --themes 手工输入。")
-        theme_source = "stage1"
-        target_themes = list(proposal_context.target_themes)
-
-    scope_selection = resolve_scope_selection(
-        args.kanripo_root,
-        scope_families=split_csv(args.scopes),
-        repo_dirs=split_csv(args.repos),
-    )
-    if not scope_selection.scope_families and not scope_selection.repo_dirs:
-        raise SystemExit("至少提供 --scopes 或 --repos 其中之一。")
-    if not scope_selection.is_valid:
-        raise SystemExit(
-            "存在无效输入: "
-            f"missing_scope_families={list(scope_selection.missing_scope_families)} "
-            f"missing_repo_dirs={list(scope_selection.missing_repo_dirs)}"
-        )
-
-    manifest = build_stage3_manifest(
-        workspace_root=Path.cwd(),
-        outputs_root=outputs_root,
-        project_name=args.project,
-        kanripo_root=args.kanripo_root,
-        theme_source=theme_source,
-        target_themes=target_themes,
-        scope_selection=scope_selection,
-        proposal_context=proposal_context,
-        dotenv_path=_resolved_env_file(args.env_file),
-    )
-    return _runtime_payload(
-        manifest=manifest,
-        project_dir=project_dir,
-        stage3_dir=stage3_dir,
-        session_data=session_data,
-    )
-
-
-def _interactive_payload(args: argparse.Namespace, outputs_root: Path) -> dict[str, Any]:
-    project_name = args.project or _pick_project(outputs_root)
-    project_dir, proposal_context = _resolve_project_context(outputs_root, project_name)
-    stage3_dir = ensure_stage3_workspace(project_dir)
-    resumed = load_stage3_session(project_dir)
-    session_data = _base_session_payload(project_dir, proposal_context)
-    session_data.update(resumed)
-    _save_progress(project_dir, session_data=session_data, status="project_selected")
-
-    if resumed:
-        print()
-        print(f"检测到已有阶段三工作目录，将沿用上次配置作为默认值: {stage3_dir}")
-        print(summarize_retrieval_progress(resumed.get("retrieval_progress")))
-
-    kanripo_default = args.kanripo_root if args.kanripo_root != DEFAULT_KANRIPO_ROOT else str(
-        session_data.get("kanripo_root") or DEFAULT_KANRIPO_ROOT
-    )
-    kanripo_root = Path(_prompt("Kanripo 根目录", default=kanripo_default)).expanduser().resolve()
-    if not kanripo_root.exists():
-        raise SystemExit(f"Kanripo 根目录不存在: {kanripo_root}")
-    _save_progress(project_dir, session_data=session_data, status="project_selected", kanripo_root=kanripo_root)
-
-    theme_source, target_themes = _choose_theme_source(
-        proposal_context,
-        default_source=str(session_data.get("theme_source") or ""),
-        default_themes=_theme_items_from_payload(session_data.get("target_themes")),
-    )
-    if not target_themes:
-        raise SystemExit("没有可用的分析主题。")
-    _save_progress(
-        project_dir,
-        session_data=session_data,
-        status="themes_selected",
-        kanripo_root=kanripo_root,
-        theme_source=theme_source,
-        target_themes=target_themes,
-    )
-
-    raw_scopes, raw_repos = _prompt_scope_inputs(
-        kanripo_root,
-        default_scopes=[str(item) for item in session_data.get("scope_families", []) if str(item)],
-        default_repos=[str(item) for item in session_data.get("repo_dirs", []) if str(item)],
-    )
-    scope_selection = resolve_scope_selection(
-        kanripo_root,
-        scope_families=raw_scopes,
-        repo_dirs=raw_repos,
-    )
-    if not scope_selection.is_valid:
-        print()
-        if scope_selection.missing_scope_families:
-            print(f"无效 scope family: {', '.join(scope_selection.missing_scope_families)}")
-        if scope_selection.missing_repo_dirs:
-            print(f"无效 repo 目录: {', '.join(scope_selection.missing_repo_dirs)}")
-        raise SystemExit("阶段三 manifest 未写入，请修正后重试。")
-    _save_progress(
-        project_dir,
-        session_data=session_data,
-        status="scopes_selected",
-        kanripo_root=kanripo_root,
-        theme_source=theme_source,
-        target_themes=target_themes,
-        scope_families=list(scope_selection.scope_families),
-        repo_dirs=list(scope_selection.repo_dirs),
-    )
-
-    manifest = build_stage3_manifest(
-        workspace_root=Path.cwd(),
-        outputs_root=outputs_root,
-        project_name=project_name,
-        kanripo_root=kanripo_root,
-        theme_source=theme_source,
-        target_themes=target_themes,
-        scope_selection=scope_selection,
-        proposal_context=proposal_context,
-        dotenv_path=_resolved_env_file(args.env_file),
-    )
-    return _runtime_payload(
-        manifest=manifest,
-        project_dir=project_dir,
-        stage3_dir=stage3_dir,
-        session_data=session_data,
-    )
-
-
-def _should_use_interactive(args: argparse.Namespace) -> bool:
-    return bool(
-        args.interactive
-        or not args.project
-        or (not args.scopes and not args.repos)
-        or (not args.source and not args.themes)
-    )
+def _build_session_payload(
+    *,
+    project_dir: Path,
+    stage3_context: Any,
+    kanripo_root: Path,
+    analysis_targets: list[str],
+    manifest_output_path: Path | None,
+) -> dict[str, Any]:
+    return {
+        "session_version": 3,
+        "status": "configured",
+        "project_name": project_dir.name,
+        "project_dir": str(project_dir),
+        "stage3_workspace_dir": str(stage3_workspace_dir(project_dir)),
+        "manifest_path": str(manifest_output_path) if manifest_output_path else "",
+        "workspace_manifest_path": str(stage3_workspace_dir(project_dir) / "manifest.json"),
+        "scholarship_map_path": str(stage3_context.scholarship_map_path),
+        "proposal_path": str(stage3_context.proposal_path) if stage3_context.proposal_path else "",
+        "journal_path": str(stage3_context.journal_path) if stage3_context.journal_path else "",
+        "research_question": stage3_context.research_question,
+        "idea": stage3_context.research_question,
+        "theme_source": "stage2_handoff",
+        "target_themes": [
+            {"theme": item.theme, "description": item.description}
+            for item in stage3_context.target_themes
+        ],
+        "kanripo_root": str(kanripo_root),
+        "analysis_targets": analysis_targets,
+    }
 
 
 def _emit_summary(
     manifest: dict[str, Any],
     *,
     manifest_output_path: Path | None,
-    stage3_dir: Path,
     session_output_path: Path | None,
-    retrieval_progress: dict[str, Any] | None,
     as_json: bool,
 ) -> None:
     payload = dict(manifest)
     payload["manifest_path"] = str(manifest_output_path) if manifest_output_path else ""
-    payload["stage3_workspace_dir"] = str(stage3_dir)
     payload["session_path"] = str(session_output_path) if session_output_path else ""
-    payload["retrieval_progress"] = retrieval_progress or {}
 
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -578,16 +307,15 @@ def _emit_summary(
 
     print()
     print(f"项目: {payload['project_name']}")
-    print(f"主题来源: {payload['theme_source']}")
-    print("分析主题:")
-    for item in payload["target_themes"]:
-        print(f"  - {item['theme']}")
-    print(f"scope family: {', '.join(payload['scope_families']) or '(空)'}")
-    print(f"repo 目录: {', '.join(payload['repo_dirs']) or '(空)'}")
-    print(f"阶段三工作目录: {stage3_dir}")
-    print(summarize_retrieval_progress(retrieval_progress))
+    print(f"analysis_targets: {', '.join(payload['analysis_targets'])}")
+    print(
+        f"预估正文规模: {payload['corpus_overview']['text_char_count']} 字"
+        f" | 文本 {payload['corpus_overview']['text_file_count']}"
+        f" | 目录 {payload['corpus_overview']['repo_dir_count']}"
+    )
+    print(f"阶段三工作目录: {payload['stage3_workspace_dir']}")
     if session_output_path:
-        print(f"续跑会话文件: {session_output_path}")
+        print(f"会话文件: {session_output_path}")
     if manifest_output_path:
         print(f"manifest 已写入: {manifest_output_path}")
     else:
@@ -603,45 +331,70 @@ def main() -> int:
     if args.show_checkpoint or args.checkpoint_action:
         return _handle_checkpoint_command(args, outputs_root)
 
-    payload = (
-        _interactive_payload(args, outputs_root)
-        if _should_use_interactive(args)
-        else _non_interactive_payload(args, outputs_root)
-    )
+    project_name = args.project or _pick_project(outputs_root)
+    project_dir, stage3_context = _resolve_project(outputs_root, project_name)
+    ensure_stage3_workspace(project_dir)
 
-    manifest = payload["manifest"]
-    project_dir = payload["project_dir"]
-    stage3_dir = payload["stage3_dir"]
-    session_data = payload["session_data"]
+    resumed_session = load_stage3_session(project_dir)
+    if resumed_session:
+        print()
+        print(f"检测到已有阶段三会话: {stage3_session_path(project_dir)}")
+        print(summarize_retrieval_progress(resumed_session.get("retrieval_progress")))
+
+    kanripo_root = Path(args.kanripo_root).expanduser().resolve()
+    if not kanripo_root.exists():
+        raise SystemExit(f"Kanripo 根目录不存在: {kanripo_root}")
+
+    if not args.json:
+        _print_intro(project_dir, stage3_context, kanripo_root)
+
+    if args.targets:
+        selection = resolve_analysis_targets(kanripo_root, raw_input=args.targets)
+        if not selection.tokens:
+            raise SystemExit("至少输入一个调研范围。")
+        if selection.issues:
+            details = "; ".join(f"{item.token}: {item.detail}" for item in selection.issues)
+            raise SystemExit(f"调研范围无效: {details}")
+        analysis_targets = list(selection.analysis_targets)
+        corpus_overview = measure_corpus_overview(kanripo_root, selection).as_dict()
+        if not args.json:
+            _print_corpus_overview(measure_corpus_overview(kanripo_root, selection))
+    else:
+        analysis_targets, corpus_overview = _prompt_analysis_targets(
+            kanripo_root,
+            default_targets=analysis_targets_from_session(resumed_session),
+        )
+
+    manifest = build_stage3_manifest(
+        workspace_root=Path.cwd(),
+        outputs_root=outputs_root,
+        project_name=project_name,
+        kanripo_root=kanripo_root,
+        analysis_targets=analysis_targets,
+        corpus_overview=corpus_overview,
+        stage3_context=stage3_context,
+        dotenv_path=_resolved_env_file(args.env_file),
+    )
 
     manifest_output_path: Path | None = None
     session_output_path: Path | None = None
     if not args.no_write:
         manifest_output_path = write_stage3_manifest(project_dir, manifest)
-        manifest_session_fields = _manifest_session_fields(manifest)
-        session_output_path = _save_progress(
+        session_output_path = save_stage3_session(
             project_dir,
-            session_data=session_data,
-            status="configured",
-            kanripo_root=manifest_session_fields["kanripo_root"],
-            theme_source=manifest_session_fields["theme_source"],
-            target_themes=manifest_session_fields["target_themes"],
-            scope_families=manifest_session_fields["scope_families"],
-            repo_dirs=manifest_session_fields["repo_dirs"],
-            manifest_output_path=manifest_output_path,
+            _build_session_payload(
+                project_dir=project_dir,
+                stage3_context=stage3_context,
+                kanripo_root=kanripo_root,
+                analysis_targets=analysis_targets,
+                manifest_output_path=manifest_output_path,
+            ),
         )
 
-    summary_session = (
-        load_stage3_session(project_dir)
-        if session_output_path
-        else normalize_stage3_session({**session_data, **_manifest_session_fields(manifest)})
-    )
     _emit_summary(
         manifest,
         manifest_output_path=manifest_output_path,
-        stage3_dir=stage3_dir,
         session_output_path=session_output_path,
-        retrieval_progress=summary_session.get("retrieval_progress"),
         as_json=args.json,
     )
     return 0

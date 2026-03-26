@@ -4,18 +4,25 @@
 
 - 阶段三的一手史料数据库、检索执行器、批量 API 调用和长流程编排留在 Skill 外部。
 - Skill 只负责：
-  - 提供阶段一生成的 `target_themes`
-  - 提供阶段一生成的目标刊物校准信息
+  - 提供阶段二生成的 `stage3_handoff`
+  - 提供阶段一生成的目标刊物校准信息作为背景参考
   - 约束阶段三最终写回的文件契约
   - 在阶段四以后消费 `3_final_corpus.yaml`
 
 ## 外部执行器必须理解的输入
 
 - 项目目录：`outputs/<project>/`
-- 阶段一 proposal：`outputs/<project>/1_research_proposal.md`
+- 阶段二 scholarship map：`outputs/<project>/2b_scholarship_map.yaml`
 - 阶段一目标刊物校准：`outputs/<project>/1_journal_targeting.md`
-- 检索主题：优先读取 proposal front matter 中的 `target_themes`
+- 阶段一 proposal：`outputs/<project>/1_research_proposal.md`
+- 检索主题：优先读取 scholarship map 中的 `stage3_handoff.target_themes`
 - 可选配置：`outputs/<project>/3_stage3_manifest.json`
+
+`stage3_handoff` 的最低机器输入是：
+
+- `target_themes`
+
+如果需要，阶段二还可以继续补充检索重点、材料类型提示与排除项；但这些都属于可选增强，不是最小契约。
 
 ## 外部执行器必须写回的输出
 

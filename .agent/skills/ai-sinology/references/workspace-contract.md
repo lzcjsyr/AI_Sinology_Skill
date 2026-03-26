@@ -7,6 +7,8 @@
 
 所有项目都放在当前工作目录的 `outputs/<project>/` 下。
 
+新建项目时，除 `project_progress.yaml` 外，还应预建：`outputs/<project>/_stage2a/papers/`。
+
 ## 项目级进度文件
 
 每个项目都应有：`outputs/<project>/project_progress.yaml`
@@ -42,11 +44,9 @@ Skill 在每次推进阶段后都应同步更新这个文件。
 - 必须包含 YAML front matter。
 - front matter 至少包含：
   - `idea`
-  - `target_themes`
 - 建议同时包含：
   - `target_journal`
   - `settled_research_direction`
-- `target_themes` 必须是给阶段三检索使用的主题，而不是最终论文结论句。
 - 如果用户起初没有说明投稿目标，Skill 应先追问；如果目标期刊不在内置单刊 reference 内，Skill 应优先要求用户提供期刊网页并据此提炼要求，只有网页拿不到时才补问期刊级别、文章样式、篇幅与体例等信息。
 
 ### 阶段二
@@ -60,11 +60,14 @@ Skill 在每次推进阶段后都应同步更新这个文件。
 - 若使用 Skill 自带的开放来源脚本，推荐将过程文件保存在 `outputs/<project>/_stage2a/`。
 - `outputs/<project>/_stage2a/` 推荐包含：
   - `openalex-*.json`
-  - `crossref-*.json`
-  - `doaj-*.json`
+  - `candidate_papers.md`
   - `screening-notes.md`
+  - `papers/`
 - 上述 `_stage2a/` 文件都属于过程产物，不替代正式阶段文件。
+- `candidate_papers.md` 用于沉淀自动化调研与网页补检后保留的候选论文清单。
+- `papers/` 用于存放 `2A` 后人工补入的 PDF、题录导出和读书笔记；`2B` 默认应把这里视为主要依据之一。
 - `2B` 应在 `2A` 的候选集相对稳定后再开始；如果来源覆盖不足，需要先停在 `2A` 等待用户补充资料。
+- `2b_scholarship_map.yaml` 同时承担阶段三正式交接；阶段三默认直接读取其中的 `stage3_handoff`。
 
 `2b_scholarship_map.yaml` 的最小结构：
 
@@ -84,6 +87,10 @@ gaps_to_address:
   - "..."
 claim_boundaries:
   - "..."
+stage3_handoff:
+  target_themes:
+    - theme: "..."
+      description: "..."
 ```
 
 其中真正关键的是：
@@ -92,12 +99,14 @@ claim_boundaries:
 - `debates`
 - `gaps_to_address`
 - `claim_boundaries`
+- `stage3_handoff.target_themes`
 
 ### 阶段三
 
 - 阶段三开始时，应先选择 `outputs/<project>/` 下的目标项目。
 - 随后应创建阶段三工作目录：`outputs/<project>/_stage3/`
 - 阶段三过程文件应默认写入该目录，以便中断后继续。
+- 阶段三默认读取 `outputs/<project>/2b_scholarship_map.yaml` 中的 `stage3_handoff` 作为检索输入；`1_journal_targeting.md` 与 `1_research_proposal.md` 只作为背景参考。
 - 文件：`3_final_corpus.yaml`
 - 由 Skill 外部的数据库与 API 检索链路生成。
 - Skill 只消费，不负责生产。
