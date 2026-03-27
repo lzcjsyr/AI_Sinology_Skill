@@ -13,6 +13,7 @@ from .catalog import (
     resolve_analysis_targets,
     split_target_tokens,
 )
+from .runner import Stage2RunnerError, run_stage2_pipeline
 from .session import (
     STAGE2_MANIFEST_FILE,
     STAGE2_SESSION_FILE,
@@ -48,6 +49,7 @@ __all__ = [
     "STAGE2_WORKSPACE_DIR",
     "STAGE2_WORKSPACE_MANIFEST_FILE",
     "ScopeOption",
+    "Stage2RunnerError",
     "Stage2Context",
     "TargetCorpusStat",
     "TargetIssue",
@@ -71,6 +73,7 @@ __all__ = [
     "stage2_workspace_dir",
     "stage2_workspace_manifest_path",
     "summarize_retrieval_progress",
+    "run_stage2_pipeline",
     "update_retrieval_progress",
     "update_stage2_session_checkpoint",
     "write_stage2_manifest",

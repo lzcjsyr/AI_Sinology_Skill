@@ -5,24 +5,49 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
-from .catalog import measure_corpus_overview, resolve_analysis_targets
-from .session import (
-    Stage2Context,
-    analysis_targets_from_session,
-    build_stage2_manifest,
-    ensure_stage2_workspace,
-    load_stage2_context,
-    load_stage2_session,
-    save_stage2_session,
-    stage2_session_path,
-    stage2_workspace_dir,
-    summarize_retrieval_progress,
-    update_stage2_session_checkpoint,
-    write_stage2_manifest,
-)
-from .skill_bridge import inspect_project, list_projects
+if __package__ in {None, ""}:
+    WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+    if str(WORKSPACE_ROOT) not in sys.path:
+        sys.path.insert(0, str(WORKSPACE_ROOT))
+    from runtime.stage2.catalog import measure_corpus_overview, resolve_analysis_targets
+    from runtime.stage2.runner import run_stage2_pipeline
+    from runtime.stage2.session import (
+        Stage2Context,
+        analysis_targets_from_session,
+        build_stage2_manifest,
+        ensure_stage2_workspace,
+        load_stage2_context,
+        load_stage2_session,
+        save_stage2_session,
+        stage2_session_path,
+        stage2_workspace_dir,
+        summarize_retrieval_progress,
+        update_stage2_session_checkpoint,
+        write_stage2_manifest,
+    )
+    from runtime.stage2.skill_bridge import inspect_project, list_projects
+else:
+    WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+    from .catalog import measure_corpus_overview, resolve_analysis_targets
+    from .runner import run_stage2_pipeline
+    from .session import (
+        Stage2Context,
+        analysis_targets_from_session,
+        build_stage2_manifest,
+        ensure_stage2_workspace,
+        load_stage2_context,
+        load_stage2_session,
+        save_stage2_session,
+        stage2_session_path,
+        stage2_workspace_dir,
+        summarize_retrieval_progress,
+        update_stage2_session_checkpoint,
+        write_stage2_manifest,
+    )
+    from .skill_bridge import inspect_project, list_projects
 
 
 DEFAULT_KANRIPO_ROOT = "data/kanripo_repos"
@@ -58,6 +83,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选 .env 文件路径；默认读取当前工作目录下的 .env，并写入模型槽位摘要。",
     )
     parser.add_argument("--no-write", action="store_true", help="只预览 manifest，不写文件。")
+    parser.add_argument("--run", action="store_true", help="写入 manifest/session 后直接执行阶段二筛读。")
+    parser.add_argument(
+        "--max-fragments",
+        type=int,
+        help="执行模式下最多读取多少个分页 fragment；默认不限。",
+    )
+    parser.add_argument("--llm1-workers", type=int, default=4, help="执行模式下 llm1 并发数。")
+    parser.add_argument("--llm2-workers", type=int, default=4, help="执行模式下 llm2 并发数。")
+    parser.add_argument("--llm3-workers", type=int, default=2, help="执行模式下 llm3 并发数。")
+    parser.add_argument("--force-rerun", action="store_true", help="忽略已缓存的 target 产物并重跑。")
     parser.add_argument(
         "--checkpoint-action",
         choices=("start", "checkpoint", "pause", "complete", "reset"),
@@ -148,7 +183,18 @@ def _resolve_project(outputs_root: Path, project_name: str) -> tuple[Path, Stage
 
 
 def _resolved_env_file(raw_env_file: str | None) -> str:
-    return raw_env_file or DEFAULT_ENV_FILE
+    if raw_env_file:
+        return raw_env_file
+    return str(WORKSPACE_ROOT / DEFAULT_ENV_FILE)
+
+
+def _resolve_runtime_path(raw_value: str, *, default_relative: str) -> Path:
+    candidate = Path(raw_value if raw_value else default_relative).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    if raw_value and raw_value != default_relative:
+        return candidate.resolve()
+    return (WORKSPACE_ROOT / default_relative).resolve()
 
 
 def _print_intro(project_dir: Path, stage2_context: Stage2Context, kanripo_root: Path) -> None:
@@ -336,14 +382,105 @@ def _emit_summary(
         print("manifest 仅预览，未写入文件。")
 
 
+def _emit_run_summary(summary: dict[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+
+    print()
+    print("阶段二执行完成:")
+    print(f"项目: {summary['project_name']}")
+    print(f"analysis_targets: {', '.join(summary['analysis_targets'])}")
+    print(f"最终保留: {summary['piece_count']} 个 piece_id / {summary['record_count']} 条记录")
+    for item in summary.get("targets") or []:
+        print(
+            f"  - {item['target']}"
+            f" | fragments {item['fragment_count']}"
+            f" | batches {item['batch_count']}"
+            f" | consensus {item['consensus_count']}"
+            f" | disputes {item['dispute_count']}"
+            f" | final {item['final_record_count']}"
+        )
+
+
+def _build_progress_printer(*, as_json: bool):
+    stream = sys.stderr if as_json else sys.stdout
+
+    def emit(event: dict[str, Any]) -> None:
+        event_name = str(event.get("event") or "").strip()
+        if not event_name:
+            return
+
+        if event_name == "pipeline_started":
+            line = (
+                f"[stage2] 开始执行 | 项目={event['project_name']}"
+                f" | 目标数={event['target_count']}"
+                f" | analysis_targets={', '.join(event.get('analysis_targets') or [])}"
+            )
+        elif event_name == "target_started":
+            line = f"[stage2] 开始目标 {event['target']} | repo_dirs={event['repo_dir_count']}"
+        elif event_name == "target_resumed":
+            line = f"[stage2] 恢复目标 {event['target']} | {event['summary']}"
+        elif event_name == "target_reused":
+            line = f"[stage2] 复用缓存 {event['target']} | final_records={event['final_record_count']}"
+        elif event_name == "fragments_ready":
+            line = f"[stage2] {event['target']} 切片完成 | fragments={event['fragment_count']}"
+        elif event_name == "batches_ready":
+            line = f"[stage2] {event['target']} 批次就绪 | batches={event['batch_count']}"
+        elif event_name == "slot_resume":
+            line = f"[stage2] {event['target']} {event['slot']} 复用缓存 | {event['completed']}/{event['total']}"
+        elif event_name == "slot_progress":
+            line = (
+                f"[stage2] {event['target']} {event['slot']} 进度"
+                f" | {event['completed']}/{event['total']}"
+                f" | 当前批次={event['batch_id']}"
+            )
+        elif event_name == "consensus_ready":
+            line = (
+                f"[stage2] {event['target']} 双模型比对完成"
+                f" | consensus={event['consensus_count']}"
+                f" | disputes={event['dispute_count']}"
+            )
+        elif event_name == "arbitration_resume":
+            line = f"[stage2] {event['target']} llm3 复用缓存 | {event['completed']}/{event['total']}"
+        elif event_name == "arbitration_progress":
+            line = (
+                f"[stage2] {event['target']} llm3 仲裁进度"
+                f" | {event['completed']}/{event['total']}"
+                f" | 当前={event['piece_id']}"
+            )
+        elif event_name == "target_completed":
+            line = (
+                f"[stage2] 完成目标 {event['target']}"
+                f" | final_records={event['final_record_count']}"
+                f" | final_pieces={event['final_piece_count']}"
+            )
+        elif event_name == "pipeline_completed":
+            line = (
+                f"[stage2] 全部完成 | 项目={event['project_name']}"
+                f" | piece_count={event['piece_count']}"
+                f" | record_count={event['record_count']}"
+            )
+        elif event_name == "pipeline_failed":
+            line = f"[stage2] 执行失败 | 项目={event['project_name']} | error={event['error']}"
+        else:
+            line = f"[stage2] {json.dumps(event, ensure_ascii=False)}"
+
+        print(line, file=stream, flush=True)
+
+    return emit
+
+
 def main() -> int:
     args = build_parser().parse_args()
-    outputs_root = Path(args.outputs).expanduser().resolve()
+    outputs_root = _resolve_runtime_path(args.outputs, default_relative="outputs")
     if not outputs_root.exists():
         raise SystemExit(f"outputs 根目录不存在: {outputs_root}")
 
     if args.show_checkpoint or args.checkpoint_action:
         return _handle_checkpoint_command(args, outputs_root)
+    if args.run and args.no_write:
+        raise SystemExit("--run 不能与 --no-write 同时使用。")
 
     project_name = args.project or _pick_project(outputs_root)
     project_dir, stage2_context = _resolve_project(outputs_root, project_name)
@@ -355,7 +492,7 @@ def main() -> int:
         print(f"检测到已有阶段二会话: {stage2_session_path(project_dir)}")
         print(summarize_retrieval_progress(resumed_session.get("retrieval_progress")))
 
-    kanripo_root = Path(args.kanripo_root).expanduser().resolve()
+    kanripo_root = _resolve_runtime_path(args.kanripo_root, default_relative=DEFAULT_KANRIPO_ROOT)
     if not kanripo_root.exists():
         raise SystemExit(f"Kanripo 根目录不存在: {kanripo_root}")
 
@@ -381,7 +518,7 @@ def main() -> int:
         )
 
     manifest = build_stage2_manifest(
-        workspace_root=Path.cwd(),
+        workspace_root=WORKSPACE_ROOT,
         outputs_root=outputs_root,
         project_name=project_name,
         kanripo_root=kanripo_root,
@@ -406,12 +543,25 @@ def main() -> int:
             ),
         )
 
-    _emit_summary(
-        manifest,
-        manifest_output_path=manifest_output_path,
-        session_output_path=session_output_path,
-        as_json=args.json,
-    )
+    if not (args.run and args.json):
+        _emit_summary(
+            manifest,
+            manifest_output_path=manifest_output_path,
+            session_output_path=session_output_path,
+            as_json=args.json,
+        )
+    if args.run:
+        summary = run_stage2_pipeline(
+            project_dir=project_dir,
+            dotenv_path=_resolved_env_file(args.env_file),
+            max_fragments=args.max_fragments,
+            llm1_workers=args.llm1_workers,
+            llm2_workers=args.llm2_workers,
+            llm3_workers=args.llm3_workers,
+            force_rerun=args.force_rerun,
+            progress_callback=_build_progress_printer(as_json=args.json),
+        )
+        _emit_run_summary(summary, as_json=args.json)
     return 0
 
 

@@ -73,6 +73,10 @@ STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
 }
 
 
+def screening_batch_char_limit() -> int:
+    return max(1, int(STAGE2_RUNTIME_DEFAULTS["screening_batch_max_chars"]))
+
+
 def _parse_key_pool(value: str | None) -> tuple[str, ...]:
     if value is None:
         return ()
