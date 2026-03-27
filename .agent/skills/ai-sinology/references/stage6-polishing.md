@@ -3,7 +3,7 @@
 ## 输入
 
 - `5_first_draft.md`
-- `3_final_corpus.yaml`
+- `2_primary_corpus.yaml`
 
 ## 输出
 

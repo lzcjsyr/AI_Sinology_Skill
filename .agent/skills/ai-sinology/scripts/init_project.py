@@ -64,7 +64,8 @@ def main() -> int:
 
     project_dir = outputs_root / args.project
     project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "_stage2a" / "papers").mkdir(parents=True, exist_ok=True)
+    (project_dir / "_stage2").mkdir(parents=True, exist_ok=True)
+    (project_dir / "_stage3b" / "papers").mkdir(parents=True, exist_ok=True)
 
     progress_path = project_dir / project_progress_filename()
     if progress_path.exists() and not args.force:

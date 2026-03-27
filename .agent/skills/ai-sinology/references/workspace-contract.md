@@ -7,7 +7,7 @@
 
 所有项目都放在当前工作目录的 `outputs/<project>/` 下。
 
-新建项目时，除 `project_progress.yaml` 外，还应预建：`outputs/<project>/_stage2a/papers/`。
+新建项目时，除 `project_progress.yaml` 外，还应预建：`outputs/<project>/_stage2/` 与 `outputs/<project>/_stage3b/papers/`。
 
 ## 项目级进度文件
 
@@ -51,81 +51,14 @@ Skill 在每次推进阶段后都应同步更新这个文件。
 
 ### 阶段二
 
-- 文件：`2b_scholarship_map.yaml`
-- 这是独立于阶段三一手史料总库的学术史研究产物，不应与史料总库混写。
-- 可以由 Skill 结合用户提供书目、PDF、题录和联网检索生成。
-- 阶段二虽然只有一个正式阶段文件，但执行上默认拆成 `2A` 与 `2B`：
-  - `2A`：检索扩展与候选集收敛
-  - `2B`：学术史地图写作
-- 若使用 Skill 自带的开放来源脚本，推荐将过程文件保存在 `outputs/<project>/_stage2a/`。
-- `outputs/<project>/_stage2a/` 推荐包含：
-  - `openalex-*.json`
-  - `candidate_papers.md`
-  - `screening-notes.md`
-  - `papers/`
-- 上述 `_stage2a/` 文件都属于过程产物，不替代正式阶段文件。
-- `candidate_papers.md` 用于沉淀自动化调研与网页补检后保留的候选论文清单。
-- `papers/` 用于存放 `2A` 后人工补入的 PDF、题录导出和读书笔记；`2B` 默认应把这里视为主要依据之一。
-- `2B` 应在 `2A` 的候选集相对稳定后再开始；如果来源覆盖不足，需要先停在 `2A` 等待用户补充资料。
-- `2b_scholarship_map.yaml` 同时承担阶段三正式交接；阶段三默认直接读取其中的 `stage3_handoff`。
+- 文件：`2_primary_corpus.yaml`
+- 阶段二只负责原始文献勘查与一手灵感积累，不与二手学术史混写。
+- 阶段二默认直接读取阶段一文件，不等待后置 scholarship map。
+- 由 Skill 外部运行时生成；Skill 只约束写回契约。
+- 推荐同时提供：`2_stage2_manifest.json`
+- 推荐同时保留：`outputs/<project>/_stage2/session.json` 与 `outputs/<project>/_stage2/manifest.json`
 
-`2b_scholarship_map.yaml` 的最小结构：
-
-```yaml
-research_question: "..."
-target_journals:
-  - "..."
-major_positions:
-  - scholar: "..."
-    work: "..."
-    claim: "..."
-debates:
-  - issue: "..."
-    positions:
-      - "..."
-gaps_to_address:
-  - "..."
-claim_boundaries:
-  - "..."
-stage3_handoff:
-  target_themes:
-    - theme: "..."
-      description: "..."
-```
-
-其中真正关键的是：
-
-- `major_positions`
-- `debates`
-- `gaps_to_address`
-- `claim_boundaries`
-- `stage3_handoff.target_themes`
-
-### 阶段三
-
-- 阶段三开始时，应先选择 `outputs/<project>/` 下的目标项目。
-- 随后应创建阶段三工作目录：`outputs/<project>/_stage3/`
-- 阶段三过程文件应默认写入该目录，以便中断后继续。
-- 阶段三默认读取 `outputs/<project>/2b_scholarship_map.yaml` 中的 `stage3_handoff` 作为检索输入；`1_journal_targeting.md` 与 `1_research_proposal.md` 只作为背景参考。
-- 文件：`3_final_corpus.yaml`
-- 由 Skill 外部的数据库与 API 检索链路生成。
-- Skill 只消费，不负责生产。
-- 推荐同时提供：`3_stage3_manifest.json`
-- 推荐同时保留：
-  - `outputs/<project>/_stage3/session.json`
-  - `outputs/<project>/_stage3/manifest.json`
-
-`session.json` 除了配置项，建议至少包含以下断点字段，用于阶段三多次运行时续跑：
-
-- `analysis_targets`
-- `retrieval_progress.completed_targets`
-- `retrieval_progress.pending_targets`
-- `retrieval_progress.current_target`
-- `retrieval_progress.current_cursor`
-- `retrieval_progress.last_piece_id`
-- `retrieval_progress.completed_piece_count`
-
-`3_final_corpus.yaml` 的最小结构：
+`2_primary_corpus.yaml` 的最小结构：
 
 ```yaml
 piece_count: 2
@@ -135,15 +68,67 @@ records:
     matched_theme: "祈雨"
     original_text: |
       原始史料正文
-    note: "可选，外部阶段三写入的简短说明"
+    note: "可选，外部阶段二写入的简短说明"
 ```
 
-Skill 端真正依赖的字段只有：
+其中真正关键的是：
 
 - `piece_id`
 - `source_file`
 - `matched_theme`
 - `original_text`
+
+### 阶段三
+
+- 阶段三拆成 `3A`、`3B`、`3C` 三段。
+- `3A` 文件：`3a_deepened_thinking.md`
+- `3B` 过程目录：`outputs/<project>/_stage3b/`
+- `3C` 文件：`3c_scholarship_map.yaml`
+- `3B` 推荐包含：
+  - `openalex-*.json`
+  - `baidu-scholar-*.json`
+  - `candidate_papers.md`
+  - `screening-notes.md`
+  - `papers/`
+- 上述 `_stage3b/` 文件都属于过程产物，不替代正式阶段文件。
+- `3A` 应先基于阶段一与阶段二原始文献，提炼出更深的问题意识、暂定判断和后续验证重点。
+- `3B` 负责二手研究的检索扩展与候选集收敛。
+- `3C` 负责生成结构化 scholarship map。
+
+`3c_scholarship_map.yaml` 的最小结构：
+
+```yaml
+research_question: "..."
+target_journals:
+  - "..."
+core_works:
+  - scholar: "..."
+    work: "..."
+    claim: "..."
+major_positions:
+  - label: "路径A"
+    claims:
+      - "..."
+debates:
+  - issue: "..."
+    positions:
+      - label: "观点A"
+        claim: "..."
+gaps_to_address:
+  - "..."
+usable_frames:
+  - "..."
+claim_boundaries:
+  - "..."
+```
+
+Skill 端真正依赖的字段只有：
+
+- `core_works`
+- `major_positions`
+- `debates`
+- `gaps_to_address`
+- `claim_boundaries`
 
 ### 阶段四
 
@@ -167,7 +152,7 @@ chapters:
               - "pb:KR3j0001_001-1a"
 ```
 
-`evidence_anchors` 只能引用阶段三 corpus 中真实存在的 `piece_id`。
+`evidence_anchors` 只能引用阶段二 corpus 中真实存在的 `piece_id`。
 
 `4_argument_audit.md` 至少应覆盖：
 

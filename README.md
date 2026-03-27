@@ -144,10 +144,11 @@ pytest
 
 - 读取 `1_journal_targeting.md` 与 `1_research_proposal.md`
 - 拆出 3 到 8 组检索轴，而不是只打一条 query
-- 用 `OpenAlex` 做首轮检索
+- 中文主题下优先用 `百度学术` 做首轮发现与补漏，再用 `OpenAlex` 做结构化扩展
 - 首轮 `OpenAlex` 后，再用 agent 自身的网页搜索/浏览能力补检高相关结果
+- 每个可用 API 默认都应进行多轮尝试，而不是各搜 1 到 2 次就停；如果结果不够，应主动更换关键词、改写检索轴、补做中英文互译与近义概念组合，再继续搜索
 - 由 agent 根据题名、摘要、刊物、作者、引用关系判断哪些 works 值得保留
-- 由 agent 选出 seed works，并调用 `openalex-expand` 抓一跳引用继续扩展
+- 由 agent 选出 seed works，并调用 `openalex-expand --expand-mode references` 顺着参考文献表继续扩展
 - 在开放来源不够时，停下来等待用户补充外部资料
 - 把过程产物持续写入 `outputs/<project>/_stage2a/`
 
@@ -189,8 +190,8 @@ pytest
 推荐按两层入口处理：
 
 - 可直接自动处理的开放入口：
-  - `OpenAlex`：阶段二默认主 API，用于 works、authors、sources、topics 与引用关系。
-  - `百度学术`：适合作为中文论文题录、摘要与期刊名的补充入口，当前通过千帆工具 API 接入。
+  - `百度学术`：中文主题下应更倚重的首轮发现与补漏入口，适合作为中文论文题录、摘要与期刊名的补充源，当前通过千帆工具 API 接入。
+  - `OpenAlex`：用于 works、authors、sources、topics 与引用关系，尤其适合围绕高相关 seed 沿 `referenced_works` 扩展。
 - 外部补料：
   - 用户自行补充导出题录、PDF、DOI、URL 或书目笔记
 
@@ -231,7 +232,7 @@ QIANFAN_API_KEY=your_qianfan_api_key
 ```bash
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py baidu-scholar --project demo --query "汉代 灾异 诠释" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex-expand --project demo --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --per-page 10 --env-file .env
+python3 .agent/skills/ai-sinology/scripts/stage2a_sources.py openalex-expand --project demo --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --expand-mode references --per-page 10 --env-file .env
 python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project demo --source-json outputs/demo/_stage2a/openalex-xxx.json
 ```
 
@@ -239,11 +240,11 @@ python3 .agent/skills/ai-sinology/scripts/stage2b_scholarship_map.py --project d
 
 1. 先由 agent 读取 `1_journal_targeting.md` 与 `1_research_proposal.md`
 2. 进入 `2A`：由 agent 自主拆出多组检索轴，而不是固定只打一条 query
-3. 先调用 `stage2a_sources.py openalex` 做首轮检索，再由 agent 自己判读哪些 works 值得继续扩展
-4. 对 agent 选中的 seed works 调用 `stage2a_sources.py openalex-expand` 抓一跳引用；脚本不负责判断相关性，也不负责自动停轮
+3. 中文主题下先调用 `stage2a_sources.py baidu-scholar` 做首轮发现与补漏，再用 `stage2a_sources.py openalex` 做结构化检索
+4. 对 agent 选中的 seed works 调用 `stage2a_sources.py openalex-expand --expand-mode references` 顺着参考文献表扩展；脚本不负责判断相关性，也不负责自动停轮
 5. 首轮 `OpenAlex` 后，再由 agent 用网页搜索/浏览补检高相关作品，只整理达到学术引用标准的页面
 6. 在 `outputs/<project>/_stage2a/candidate_papers.md` 中持续维护候选论文清单，作为 `2A` 的明确输出
-7. 由 agent 根据每轮结果质量、重复度与偏题程度决定是否继续下一轮；如果开放来源明显不够，就停在 `2A`，等用户把相关 PDF、题录导出和笔记补入 `outputs/<project>/_stage2a/papers/` 后再继续
+7. 由 agent 根据每轮结果质量、重复度与偏题程度决定是否继续下一轮；如果某轮结果不足，先换关键词、换检索轴、换语言表达继续补搜，再决定是否停轮；只有在多轮尝试后开放来源仍明显不够，才停在 `2A`，等用户把相关 PDF、题录导出和笔记补入 `outputs/<project>/_stage2a/papers/` 后再继续
 8. 当候选集相对稳定后，进入 `2B`：由 agent 读取返回 JSON、`candidate_papers.md` 与 `papers/` 目录中的人工补料，筛掉噪声，抽取 `claim`、`relevance`、`debates`
 9. 最后按需要用 `stage2b_scholarship_map.py` 生成草稿骨架，再由 agent 完成 `2b_scholarship_map.yaml`，并确认其中的 `stage3_handoff` 已足以直接交给阶段三
 

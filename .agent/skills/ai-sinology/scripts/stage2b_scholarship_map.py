@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Build a Stage 2 scholarship-map draft from already fetched source JSON files.
+# Build a Stage 3C scholarship-map draft from already fetched source JSON files.
 # This script only assembles a stable YAML scaffold and copies structured fields.
 # It does not replace the agent's research judgment about debates, positions,
 # relevance, or final claim boundaries.
@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from stage2_common import ensure_stage2a_dir, load_json, now_iso, yaml_list, yaml_quote
+from stage2_common import ensure_stage3b_dir, load_json, now_iso, yaml_list, yaml_quote
 
 
 PLACEHOLDER = "待结合研究问题与目标刊物人工补写"
@@ -122,28 +122,6 @@ def summarize_claim(record: dict[str, Any]) -> str:
     return PLACEHOLDER
 
 
-def infer_stage3_themes(*, keywords: list[str], research_question: str) -> list[dict[str, str]]:
-    candidates: list[str] = []
-    for item in keywords:
-        normalized = str(item).strip()
-        if normalized and normalized not in candidates:
-            candidates.append(normalized)
-
-    if not candidates and research_question.strip():
-        candidates.append(research_question.strip()[:24])
-
-    if not candidates:
-        candidates.append("待补阶段三检索主题")
-
-    return [
-        {
-            "theme": item,
-            "description": f"围绕“{item}”检索与当前研究问题直接相关的一手材料。",
-        }
-        for item in candidates[:5]
-    ]
-
-
 def core_work_lines(records: list[dict[str, Any]]) -> list[str]:
     if not records:
         return [
@@ -195,10 +173,6 @@ def render_yaml(
     records: list[dict[str, Any]],
     period_hint: str,
 ) -> str:
-    stage3_themes = infer_stage3_themes(
-        keywords=keywords,
-        research_question=research_question,
-    )
     lines = [
         f"research_question: {yaml_quote(research_question or PLACEHOLDER)}",
         "target_journals:",
@@ -213,7 +187,7 @@ def render_yaml(
     lines.extend(yaml_list(keywords or ["待补关键词"], indent=4))
     lines.append(f"  period_hint: {yaml_quote(period_hint)}")
     lines.append("  source_files:")
-    lines.extend(yaml_list(source_files or ["待补阶段二来源文件"], indent=4))
+    lines.extend(yaml_list(source_files or ["待补阶段三B来源文件"], indent=4))
     lines.append("core_works:")
     lines.extend(core_work_lines(records))
     lines.extend(
@@ -234,37 +208,28 @@ def render_yaml(
             "gaps_to_address:",
             f"  - {yaml_quote(PLACEHOLDER)}",
             "usable_frames:",
-            f"  - {yaml_quote('待从阶段二核心文献中归纳的问题框架或方法')}",
+            f"  - {yaml_quote('待从阶段三A判断与阶段三核心文献中归纳的问题框架或方法')}",
             "claim_boundaries:",
             f"  - {yaml_quote('当前证据暂不支持“首次”“填补空白”“彻底改写通说”等强论断')}",
-            "stage3_handoff:",
-            "  target_themes:",
         ]
     )
-    for item in stage3_themes:
-        lines.extend(
-            [
-                f"    - theme: {yaml_quote(item['theme'])}",
-                f"      description: {yaml_quote(item['description'])}",
-            ]
-        )
     lines.append(f"generated_at: {yaml_quote(now_iso())}")
     lines.append("")
     return "\n".join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="将阶段 2A 来源 JSON 汇总为 2B 学术史地图草稿。")
+    parser = argparse.ArgumentParser(description="将阶段 3B 来源 JSON 汇总为 3C 学术史地图草稿。")
     parser.add_argument("--project", required=True, help="项目名。")
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
-    parser.add_argument("--source-json", action="append", default=[], help="阶段 2A 来源 JSON，可重复传入。")
+    parser.add_argument("--source-json", action="append", default=[], help="阶段 3B 来源 JSON，可重复传入。")
     parser.add_argument("--proposal-file", help="显式指定阶段一 research proposal 文件。")
     parser.add_argument("--journal-file", help="显式指定阶段一 journal targeting 文件。")
     parser.add_argument("--research-question", default="", help="显式覆盖研究问题。")
     parser.add_argument("--target-journal", action="append", default=[], help="显式补充目标期刊，可重复传入。")
     parser.add_argument("--keyword", action="append", default=[], help="显式补充检索关键词，可重复传入。")
     parser.add_argument("--period-hint", default="近十年为主，可回溯经典文献", help="文献时间范围提示。")
-    parser.add_argument("--output", help="自定义输出路径，默认写入 outputs/<project>/2b_scholarship_map.yaml。")
+    parser.add_argument("--output", help="自定义输出路径，默认写入 outputs/<project>/3c_scholarship_map.yaml。")
     return parser
 
 
@@ -273,7 +238,7 @@ def main() -> int:
     outputs_root = Path(args.outputs).expanduser().resolve()
     project_root = outputs_root / args.project
     project_root.mkdir(parents=True, exist_ok=True)
-    ensure_stage2a_dir(args.project, outputs_root)
+    ensure_stage3b_dir(args.project, outputs_root)
 
     proposal_file = Path(args.proposal_file).expanduser() if args.proposal_file else project_root / "1_research_proposal.md"
     journal_file = Path(args.journal_file).expanduser() if args.journal_file else project_root / "1_journal_targeting.md"
@@ -294,9 +259,9 @@ def main() -> int:
         records=records,
         period_hint=args.period_hint,
     )
-    output_path = Path(args.output).expanduser().resolve() if args.output else project_root / "2b_scholarship_map.yaml"
+    output_path = Path(args.output).expanduser().resolve() if args.output else project_root / "3c_scholarship_map.yaml"
     output_path.write_text(payload, encoding="utf-8")
-    print(f"已写入阶段 2B 学术史地图草稿: {output_path}")
+    print(f"已写入阶段 3C 学术史地图草稿: {output_path}")
     print(f"合并来源记录数: {len(records)}")
     return 0
 

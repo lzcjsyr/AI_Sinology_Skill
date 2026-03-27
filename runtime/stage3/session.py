@@ -1,4 +1,4 @@
-"""管理 Stage3 会话、工作目录、manifest 和检索断点状态。"""
+"""管理阶段二原始文献运行时的会话、工作目录、manifest 和检索断点状态。"""
 
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from .api_config import STAGE3_MODELS, merged_env, slot_payload
 from .catalog import normalize_scope
 
 
-STAGE3_MANIFEST_FILE = "3_stage3_manifest.json"
-STAGE3_WORKSPACE_DIR = "_stage3"
+STAGE3_MANIFEST_FILE = "2_stage2_manifest.json"
+STAGE3_WORKSPACE_DIR = "_stage2"
 STAGE3_WORKSPACE_MANIFEST_FILE = "manifest.json"
 STAGE3_SESSION_FILE = "session.json"
 RETRIEVAL_PROGRESS_VERSION = 1
@@ -27,9 +27,9 @@ class ThemeItem:
 
 @dataclass(frozen=True)
 class Stage3Context:
-    scholarship_map_path: Path
-    proposal_path: Path | None
+    proposal_path: Path
     journal_path: Path | None
+    idea: str
     research_question: str
     target_themes: tuple[ThemeItem, ...]
 
@@ -76,125 +76,89 @@ def read_text_lines(path_like: str | Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-def parse_research_question_from_scholarship_map(path_like: str | Path) -> str:
-    for line in read_text_lines(path_like):
+def parse_frontmatter(path_like: str | Path) -> dict[str, str]:
+    lines = read_text_lines(path_like)
+    if not lines or lines[0].strip() != "---":
+        return {}
+
+    payload: dict[str, str] = {}
+    for line in lines[1:]:
         stripped = line.strip()
+        if stripped == "---":
+            break
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        payload[key.strip()] = _strip_quotes(value)
+    return payload
+
+
+def extract_first_sentence(path_like: str | Path) -> str:
+    lines = read_text_lines(path_like)
+    if not lines:
+        return ""
+
+    in_frontmatter = False
+    for index, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if index == 0 and stripped == "---":
+            in_frontmatter = True
+            continue
+        if in_frontmatter:
+            if stripped == "---":
+                in_frontmatter = False
+            continue
         if not stripped or stripped.startswith("#"):
             continue
-        indent = len(line) - len(line.lstrip(" "))
-        if indent == 0 and stripped.startswith("research_question:"):
-            return _strip_quotes(stripped.split(":", 1)[1])
+        return stripped
     return ""
 
 
-def parse_target_themes_from_scholarship_map(path_like: str | Path) -> list[ThemeItem]:
-    lines = read_text_lines(path_like)
-    if not lines:
-        return []
-
+def infer_target_themes(*, research_question: str, idea: str, settled_direction: str) -> list[ThemeItem]:
     themes: list[ThemeItem] = []
-    current: dict[str, str] | None = None
-    in_stage3_handoff = False
-    handoff_indent = 0
-    in_target_themes = False
-    target_themes_indent = 0
-
-    for line in lines:
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip(" "))
-
-        if indent == 0 and stripped.startswith("stage3_handoff:"):
-            in_stage3_handoff = True
-            handoff_indent = indent
-            in_target_themes = False
+    for raw in (settled_direction, idea, research_question):
+        theme = str(raw or "").strip()
+        if not theme or any(item.theme == theme for item in themes):
             continue
-
-        if in_stage3_handoff and stripped and indent <= handoff_indent and not stripped.startswith("-"):
-            break
-
-        if not in_stage3_handoff:
-            continue
-
-        if stripped.startswith("target_themes:"):
-            in_target_themes = True
-            target_themes_indent = indent
-            continue
-
-        if not in_target_themes:
-            continue
-
-        if stripped and indent <= target_themes_indent and not stripped.startswith("-"):
-            break
-
-        if not stripped:
-            continue
-
-        if stripped.startswith("- "):
-            if current and current.get("theme"):
-                themes.append(
-                    ThemeItem(
-                        theme=current["theme"].strip(),
-                        description=current.get("description", "").strip(),
-                    )
-                )
-
-            payload = stripped[2:].strip()
-            if payload.startswith("theme:"):
-                current = {
-                    "theme": _strip_quotes(payload.split(":", 1)[1]),
-                    "description": "",
-                }
-            else:
-                current = {
-                    "theme": _strip_quotes(payload),
-                    "description": "",
-                }
-            continue
-
-        if stripped.startswith("theme:"):
-            if current is None:
-                current = {"theme": "", "description": ""}
-            current["theme"] = _strip_quotes(stripped.split(":", 1)[1])
-            continue
-
-        if stripped.startswith("description:"):
-            if current is None:
-                current = {"theme": "", "description": ""}
-            current["description"] = _strip_quotes(stripped.split(":", 1)[1])
-
-    if current and current.get("theme"):
         themes.append(
             ThemeItem(
-                theme=current["theme"].strip(),
-                description=current.get("description", "").strip(),
+                theme=theme,
+                description="基于阶段一初步想法与研究方向提炼的初始主题。",
             )
         )
-
-    seen: set[str] = set()
-    deduped: list[ThemeItem] = []
-    for item in themes:
-        if not item.theme or item.theme in seen:
-            continue
-        seen.add(item.theme)
-        deduped.append(item)
-    return deduped
+    return themes
 
 
 def load_stage3_context(project_dir: str | Path) -> Stage3Context | None:
     project_path = Path(project_dir).expanduser().resolve()
-    scholarship_map_path = project_path / "2b_scholarship_map.yaml"
-    if not scholarship_map_path.exists():
+    proposal_path = project_path / "1_research_proposal.md"
+    if not proposal_path.exists():
         return None
 
-    target_themes = parse_target_themes_from_scholarship_map(scholarship_map_path)
-    proposal_path = project_path / "1_research_proposal.md"
     journal_path = project_path / "1_journal_targeting.md"
+    proposal_frontmatter = parse_frontmatter(proposal_path)
+    journal_frontmatter = parse_frontmatter(journal_path) if journal_path.exists() else {}
+    research_question = (
+        proposal_frontmatter.get("settled_research_direction")
+        or extract_first_sentence(proposal_path)
+        or journal_frontmatter.get("settled_research_direction", "")
+    )
+    idea = proposal_frontmatter.get("idea") or journal_frontmatter.get("idea", "") or research_question
+    settled_direction = proposal_frontmatter.get("settled_research_direction") or journal_frontmatter.get(
+        "settled_research_direction",
+        "",
+    )
+    target_themes = infer_target_themes(
+        research_question=research_question,
+        idea=idea,
+        settled_direction=settled_direction,
+    )
 
     return Stage3Context(
-        scholarship_map_path=scholarship_map_path,
-        proposal_path=proposal_path if proposal_path.exists() else None,
+        proposal_path=proposal_path,
         journal_path=journal_path if journal_path.exists() else None,
-        research_question=parse_research_question_from_scholarship_map(scholarship_map_path),
+        idea=idea,
+        research_question=research_question,
         target_themes=tuple(target_themes),
     )
 
@@ -480,21 +444,20 @@ def build_stage3_manifest(
     project_dir = outputs / project_name
     stage3_dir = stage3_workspace_dir(project_dir)
     return {
-        "stage3_manifest_version": 3,
+        "stage2_manifest_version": 2,
         "generated_at": _now_iso(),
         "workspace_root": str(workspace),
         "outputs_root": str(outputs),
         "project_name": project_name,
         "project_dir": str(project_dir),
-        "stage3_workspace_dir": str(stage3_dir),
-        "stage3_session_path": str(stage3_session_path(project_dir)),
-        "stage3_workspace_manifest_path": str(stage3_workspace_manifest_path(project_dir)),
-        "scholarship_map_path": str(stage3_context.scholarship_map_path),
-        "proposal_path": str(stage3_context.proposal_path) if stage3_context.proposal_path else "",
+        "stage2_workspace_dir": str(stage3_dir),
+        "stage2_session_path": str(stage3_session_path(project_dir)),
+        "stage2_workspace_manifest_path": str(stage3_workspace_manifest_path(project_dir)),
+        "proposal_path": str(stage3_context.proposal_path),
         "journal_path": str(stage3_context.journal_path) if stage3_context.journal_path else "",
         "research_question": stage3_context.research_question,
-        "idea": stage3_context.research_question,
-        "theme_source": "stage2_handoff",
+        "idea": stage3_context.idea,
+        "theme_source": "stage1_proposal",
         "target_themes": [
             {
                 "theme": item.theme,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Fetch normalized Stage 2 source data from public scholarly APIs.
+# Fetch normalized Stage 3B source data from public scholarly APIs.
 # This script is deliberately limited to deterministic work:
 # reading env vars, calling OpenAlex,
 # normalizing fields, and writing JSON artifacts for later agent review.
@@ -13,13 +13,14 @@ from typing import Any, Callable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from stage2_common import dump_json, ensure_stage2a_dir, merged_env, now_iso, slugify
+from stage2_common import dump_json, ensure_stage3b_dir, merged_env, now_iso, slugify
 
 
 OPENALEX_ENDPOINT = "https://api.openalex.org/works"
 BAIDU_SCHOLAR_ENDPOINT = "https://qianfan.baidubce.com/v2/tools/baidu_scholar/search"
 DEFAULT_TIMEOUT = 30
 OpenAlexFetcher = Callable[..., tuple[dict[str, str | int], list[dict[str, Any]]]]
+OPENALEX_ID_BATCH_SIZE = 100
 
 
 def build_openalex_params(
@@ -55,7 +56,7 @@ def fetch_json(endpoint: str, params: dict[str, str | int]) -> dict[str, Any]:
         f"{endpoint}?{query_string}",
         headers={
             "Accept": "application/json",
-            "User-Agent": "ai-sinology-stage2/1.0",
+            "User-Agent": "ai-sinology-stage3b/1.0",
         },
     )
     with urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
@@ -303,6 +304,66 @@ def fetch_openalex_records(
     return params, [normalize_openalex_work(item) for item in raw.get("results", [])]
 
 
+def fetch_openalex_work_detail(
+    *,
+    work_id: str,
+    mailto: str = "",
+    api_key: str = "",
+) -> dict[str, Any]:
+    normalized_id = short_openalex_id(work_id)
+    if not normalized_id:
+        return {}
+    params: dict[str, str | int] = {}
+    if mailto:
+        params["mailto"] = mailto
+    if api_key:
+        params["api_key"] = api_key
+    return fetch_json(f"{OPENALEX_ENDPOINT}/{normalized_id}", params)
+
+
+def chunked(items: list[str], size: int) -> list[list[str]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def fetch_openalex_records_by_ids(
+    *,
+    work_ids: list[str],
+    per_page: int,
+    page: int,
+    filter_expr: str = "",
+    mailto: str = "",
+    api_key: str = "",
+    fetcher: OpenAlexFetcher = fetch_openalex_records,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    fetches: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    normalized_ids = [short_openalex_id(work_id) for work_id in work_ids if short_openalex_id(work_id)]
+    unique_ids = list(dict.fromkeys(normalized_ids))
+
+    for batch in chunked(unique_ids, OPENALEX_ID_BATCH_SIZE):
+        batch_filter = f"ids.openalex:{'|'.join(batch)}"
+        if filter_expr:
+            batch_filter = f"{batch_filter},{filter_expr}"
+        params, fetched_records = fetcher(
+            query="",
+            per_page=max(per_page, len(batch)),
+            page=page,
+            filter_expr=batch_filter,
+            mailto=mailto,
+            api_key=api_key,
+        )
+        records.extend(fetched_records)
+        fetches.append(
+            {
+                "ids": batch,
+                "params": params,
+                "retrieved_count": len(fetched_records),
+            }
+        )
+
+    return records, fetches
+
+
 def fetch_baidu_scholar_records(
     *,
     query: str,
@@ -374,6 +435,72 @@ def expand_openalex_citations(
 
     return {
         "provider": "openalex-expand",
+        "expand_mode": "cited-by",
+        "query": query,
+        "retrieved_at": now_iso(),
+        "params": {
+            "seed_ids": normalized_seed_ids,
+            "per_page": per_page,
+            "page": page,
+            "round_index": round_index,
+            "filter": filter_expr,
+        },
+        "record_count": len(record_map),
+        "records": sort_records(list(record_map.values())),
+        "fetches": fetches,
+    }
+
+
+def expand_openalex_references(
+    *,
+    query: str,
+    seed_ids: list[str],
+    per_page: int,
+    page: int,
+    round_index: int,
+    filter_expr: str = "",
+    mailto: str = "",
+    api_key: str = "",
+    fetcher: OpenAlexFetcher = fetch_openalex_records,
+    work_detail_fetcher: Callable[..., dict[str, Any]] = fetch_openalex_work_detail,
+) -> dict[str, Any]:
+    record_map: dict[str, dict[str, Any]] = {}
+    fetches: list[dict[str, Any]] = []
+    normalized_seed_ids = [short_openalex_id(seed_id) for seed_id in seed_ids if short_openalex_id(seed_id)]
+
+    for parent_id in normalized_seed_ids:
+        work = work_detail_fetcher(work_id=parent_id, mailto=mailto, api_key=api_key)
+        referenced_ids = [short_openalex_id(item) for item in work.get("referenced_works", []) if short_openalex_id(item)]
+        if per_page > 0:
+            referenced_ids = referenced_ids[:per_page]
+        fetched_records, batch_fetches = fetch_openalex_records_by_ids(
+            work_ids=referenced_ids,
+            per_page=per_page,
+            page=page,
+            filter_expr=filter_expr,
+            mailto=mailto,
+            api_key=api_key,
+            fetcher=fetcher,
+        )
+        annotated = annotate_records(
+            fetched_records,
+            round_index=round_index,
+            discovered_via="referenced_works",
+            parent_id=parent_id,
+        )
+        upsert_records(record_map, annotated)
+        fetches.append(
+            {
+                "parent_id": parent_id,
+                "reference_count": len(referenced_ids),
+                "retrieved_count": len(annotated),
+                "batches": batch_fetches,
+            }
+        )
+
+    return {
+        "provider": "openalex-expand",
+        "expand_mode": "references",
         "query": query,
         "retrieved_at": now_iso(),
         "params": {
@@ -399,14 +526,14 @@ def default_output_path(
     timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     name = f"{provider}-{slugify(query)}-{timestamp}.json"
     if project:
-        return ensure_stage2a_dir(project, outputs_root) / name
+        return ensure_stage3b_dir(project, outputs_root) / name
     return Path(name).resolve()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="抓取阶段 2A 开放来源并归一化为本地 JSON。")
+    parser = argparse.ArgumentParser(description="抓取阶段 3B 开放来源并归一化为本地 JSON。")
     parser.add_argument("--env-file", default=".env", help="环境变量文件，默认读取当前目录 .env。")
-    parser.add_argument("--project", help="项目名。提供后默认把结果写入 outputs/<project>/_stage2a/。")
+    parser.add_argument("--project", help="项目名。提供后默认把结果写入 outputs/<project>/_stage3b/。")
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
     parser.add_argument("--output", help="自定义输出 JSON 路径。")
 
@@ -420,13 +547,19 @@ def build_parser() -> argparse.ArgumentParser:
     openalex.add_argument("--mailto", default="", help="显式覆盖 polite identification。")
     openalex.add_argument("--api-key", default="", help="显式覆盖 OPENALEX_API_KEY。")
 
-    openalex_expand = subparsers.add_parser("openalex-expand", help="基于 agent 选定的 seed works，抓取这些 works 引用的文献。")
+    openalex_expand = subparsers.add_parser("openalex-expand", help="基于 agent 选定的 seed works，抓取这些 works 的引用链结果。")
     openalex_expand.add_argument("--query", default="", help="当前检索轴说明，仅用于记录上下文与输出命名。")
     openalex_expand.add_argument("--seed-id", action="append", required=True, help="要展开引用链的 OpenAlex work id，可重复传入。")
     openalex_expand.add_argument("--filter", default="", help="OpenAlex filter 表达式。")
-    openalex_expand.add_argument("--per-page", type=int, default=10, help="每个 seed 展开的引用条数。")
-    openalex_expand.add_argument("--page", type=int, default=1, help="OpenAlex 引用结果页码。")
+    openalex_expand.add_argument("--per-page", type=int, default=10, help="每个 seed 最多展开多少条引用 works。")
+    openalex_expand.add_argument("--page", type=int, default=1, help="OpenAlex 批量取回 works 时使用的页码。")
     openalex_expand.add_argument("--round-index", type=int, default=1, help="当前是第几轮扩展，由 agent 维护。")
+    openalex_expand.add_argument(
+        "--expand-mode",
+        choices=("references", "cited-by"),
+        default="references",
+        help="references=抓取 seed 引用过的 works；cited-by=抓取引用 seed 的 works。",
+    )
     openalex_expand.add_argument("--mailto", default="", help="显式覆盖 polite identification。")
     openalex_expand.add_argument("--api-key", default="", help="显式覆盖 OPENALEX_API_KEY。")
 
@@ -479,16 +612,29 @@ def main() -> int:
             "records": records,
         }
     else:
-        payload = expand_openalex_citations(
-            query=args.query,
-            seed_ids=args.seed_id,
-            per_page=args.per_page,
-            page=args.page,
-            round_index=args.round_index,
-            filter_expr=args.filter,
-            mailto=args.mailto,
-            api_key=args.api_key or env.get("OPENALEX_API_KEY", ""),
-        )
+        openalex_api_key = args.api_key or env.get("OPENALEX_API_KEY", "")
+        if args.expand_mode == "cited-by":
+            payload = expand_openalex_citations(
+                query=args.query,
+                seed_ids=args.seed_id,
+                per_page=args.per_page,
+                page=args.page,
+                round_index=args.round_index,
+                filter_expr=args.filter,
+                mailto=args.mailto,
+                api_key=openalex_api_key,
+            )
+        else:
+            payload = expand_openalex_references(
+                query=args.query,
+                seed_ids=args.seed_id,
+                per_page=args.per_page,
+                page=args.page,
+                round_index=args.round_index,
+                filter_expr=args.filter,
+                mailto=args.mailto,
+                api_key=openalex_api_key,
+            )
 
     output_path = Path(args.output).expanduser().resolve() if args.output else default_output_path(
         provider=args.provider,
@@ -501,6 +647,7 @@ def main() -> int:
     print(f"已写入阶段 2A 来源结果: {output_path}")
     print(f"记录数: {payload.get('record_count', 0)}")
     if args.provider == "openalex-expand":
+        print(f"扩展模式: {payload.get('expand_mode', 'references')}")
         print(f"本轮种子: {', '.join(payload.get('params', {}).get('seed_ids', []))}")
     return 0
 

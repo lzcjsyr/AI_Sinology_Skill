@@ -4,8 +4,9 @@
 
 - `4_outline_matrix.yaml`
 - `4_argument_audit.md`
-- `2b_scholarship_map.yaml`
-- `3_final_corpus.yaml`
+- `2_primary_corpus.yaml`
+- `3a_deepened_thinking.md`
+- `3c_scholarship_map.yaml`
 
 ## 输出
 
@@ -20,7 +21,7 @@
 
 - 按 `sub_sections` 顺序逐段写作。
 - 每段只围绕当前小节的 `sub_section_argument` 展开。
-- 需要引用原文时，直接取自 `3_final_corpus.yaml` 对应记录，不要改写成不存在的引文。
+- 需要引用原文时，直接取自 `2_primary_corpus.yaml` 对应记录，不要改写成不存在的引文。
 - 每个小节结尾保留证据锚点行：
   - `证据锚点：\`piece_id_1\`, \`piece_id_2\``
 

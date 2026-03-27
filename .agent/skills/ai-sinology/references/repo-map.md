@@ -11,7 +11,7 @@
 - `./.agent/skills/ai-sinology/assets/workspace-contract.json`
   工作区契约的机器可读真相源。
 - `./runtime/stage3/`
-  阶段三外部运行时。负责材料总库相关的辅助执行、检查和续跑。
+  模块名暂沿用 `stage3`，实际负责阶段二原始文献运行时的辅助执行、检查和续跑。
 - `./outputs/`
   每个论文项目的实际产物目录。
 
@@ -31,10 +31,11 @@
   - `./.agent/skills/ai-sinology/references/stage1-venues.md`
   - `./.agent/skills/ai-sinology/references/` 下对应的单刊文件
 - 改阶段二写法：
-  - `./.agent/skills/ai-sinology/references/stage2b-scholarship-map.md`
-  - `./.agent/skills/ai-sinology/references/stage2a-data-intake.md`
+  - `./.agent/skills/ai-sinology/references/stage2-primary-corpus.md`
 - 改阶段三交接：
-  - `./.agent/skills/ai-sinology/references/stage3-handoff.md`
+  - `./.agent/skills/ai-sinology/references/stage3a-deepened-thinking.md`
+  - `./.agent/skills/ai-sinology/references/stage3b-data-intake.md`
+  - `./.agent/skills/ai-sinology/references/stage3c-scholarship-map.md`
   - `./runtime/stage3/`
 - 改阶段四写法：
   - `./.agent/skills/ai-sinology/references/stage4-outlining.md`

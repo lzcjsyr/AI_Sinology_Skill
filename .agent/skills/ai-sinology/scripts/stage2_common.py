@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-# Stage 2 shared helpers.
-# This module intentionally stays small and deterministic:
-# it only handles dotenv parsing, stage2a directory creation,
-# and a few JSON / YAML formatting helpers used by the fetch scripts.
+# Shared helpers for the secondary-literature intake scripts.
+# The script filenames keep their historical names, but the default
+# workspace now maps to Stage 3B.
 
 from datetime import datetime
 import json
@@ -37,11 +36,15 @@ def merged_env(dotenv_path: str | Path | None = None, env_values: dict[str, str]
     return values
 
 
-def ensure_stage2a_dir(project: str, outputs_root: str | Path) -> Path:
+def ensure_stage3b_dir(project: str, outputs_root: str | Path) -> Path:
     root = Path(outputs_root).expanduser().resolve()
-    target = root / project / "_stage2a"
+    target = root / project / "_stage3b"
     target.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def ensure_stage2a_dir(project: str, outputs_root: str | Path) -> Path:
+    return ensure_stage3b_dir(project, outputs_root)
 
 
 def load_json(path: str | Path) -> Any:

@@ -3,8 +3,9 @@
 ## 输入
 
 - `1_research_proposal.md`
-- `2b_scholarship_map.yaml`
-- `3_final_corpus.yaml`
+- `2_primary_corpus.yaml`
+- `3a_deepened_thinking.md`
+- `3c_scholarship_map.yaml`
 
 ## 输出
 
@@ -20,6 +21,7 @@
 
 - 先从 proposal 提炼中心论题、争点和章节方向。
 - 再从 scholarship map 提炼必须回应的学术史节点与论断边界。
+- 再从 `3a_deepened_thinking.md` 提炼已经被一手材料推动出来的问题张力与暂定判断。
 - 再按 `matched_theme` 和 `piece_id` 梳理 corpus，给每个小节分配证据。
 - 只引用真实存在的 `piece_id`，不补造锚点。
 - 优先让一个小节聚焦一个清晰论证，不要把证据堆成素材池。

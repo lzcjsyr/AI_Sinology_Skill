@@ -10,17 +10,17 @@
     },
     {
       "index": 2,
-      "name": "2A检索收敛、2B学术史地图与阶段三交接",
-      "required_all": ["2b_scholarship_map.yaml"],
+      "name": "原始文献勘查与一手灵感",
+      "required_all": ["2_primary_corpus.yaml"],
       "required_any": [],
-      "recommended": ["_stage2a", "_stage2a/candidate_papers.md", "_stage2a/papers"]
+      "recommended": ["2_stage2_manifest.json", "_stage2"]
     },
     {
       "index": 3,
-      "name": "外部一手史料总库",
-      "required_all": ["3_final_corpus.yaml"],
+      "name": "3A深化思考、3B检索收敛、3C学术史地图",
+      "required_all": ["3a_deepened_thinking.md", "3c_scholarship_map.yaml"],
       "required_any": [],
-      "recommended": ["3_stage3_manifest.json"]
+      "recommended": ["_stage3b", "_stage3b/candidate_papers.md", "_stage3b/papers"]
     },
     {
       "index": 4,

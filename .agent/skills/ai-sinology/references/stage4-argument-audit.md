@@ -3,8 +3,9 @@
 ## 输入
 
 - `4_outline_matrix.yaml`
-- `2b_scholarship_map.yaml`
-- `3_final_corpus.yaml`
+- `2_primary_corpus.yaml`
+- `3a_deepened_thinking.md`
+- `3c_scholarship_map.yaml`
 
 ## 输出
 
