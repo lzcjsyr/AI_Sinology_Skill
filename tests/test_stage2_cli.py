@@ -132,6 +132,45 @@ class Stage2CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("确认阶段二调研范围", result.stdout)
 
+    def test_cli_setup_only_prevents_default_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            outputs_root = root / "outputs"
+            project_dir = outputs_root / "demo"
+            project_dir.mkdir(parents=True)
+            (project_dir / "1_research_proposal.md").write_text(
+                "---\nidea: 冬雷诗题咏\nsettled_research_direction: 冬雷意象的诗学转化\nstage2_retrieval_themes:\n  - 唐宋冬雷题咏\n---\n正文\n",
+                encoding="utf-8",
+            )
+            (project_dir / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
+            kanripo_root = root / "kanripo_repos"
+            repo_dir = kanripo_root / "KR4c0001"
+            repo_dir.mkdir(parents=True)
+            (repo_dir / "KR4c0001_000.txt").write_text("#+TITLE: 测试\n正文内容\n", encoding="utf-8")
+
+            with (
+                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", side_effect=AssertionError("should not run")),
+                patch(
+                    "sys.argv",
+                    [
+                        "stage2-cli",
+                        "--outputs",
+                        str(outputs_root),
+                        "--project",
+                        "demo",
+                        "--kanripo-root",
+                        str(kanripo_root),
+                        "--targets",
+                        "KR4c0001",
+                        "--setup-only",
+                    ],
+                ),
+            ):
+                exit_code = main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((project_dir / "2_primary_corpus.yaml").exists())
+
     def test_cli_targets_mode_reads_default_dotenv_for_model_slots(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -249,7 +288,6 @@ class Stage2CliTests(unittest.TestCase):
                         str(kanripo_root),
                         "--targets",
                         "KR4c0001",
-                        "--run",
                     ],
                 ),
                 patch("sys.stdout", stdout),
@@ -310,6 +348,7 @@ class Stage2CliTests(unittest.TestCase):
                         str(kanripo_root),
                         "--targets",
                         "KR4c0001",
+                        "--setup-only",
                     ],
                 ),
             ):
@@ -358,6 +397,7 @@ class Stage2CliTests(unittest.TestCase):
                         str(kanripo_root),
                         "--targets",
                         "KR4c0001",
+                        "--setup-only",
                     ],
                 ),
             ):

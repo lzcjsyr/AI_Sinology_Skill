@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from importlib.util import module_from_spec, spec_from_file_location
 import json
 from pathlib import Path
 import sys
@@ -28,7 +29,6 @@ if __package__ in {None, ""}:
         update_stage2_session_checkpoint,
         write_stage2_manifest,
     )
-    from runtime.stage2.skill_bridge import inspect_project, list_projects
 else:
     WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
     from .catalog import measure_corpus_overview, resolve_analysis_targets
@@ -47,8 +47,6 @@ else:
         update_stage2_session_checkpoint,
         write_stage2_manifest,
     )
-    from .skill_bridge import inspect_project, list_projects
-
 
 DEFAULT_KANRIPO_ROOT = "data/kanripo_repos"
 DEFAULT_ENV_FILE = ".env"
@@ -63,9 +61,37 @@ WORKSPACE_CONTRACT_PATH = (
 )
 
 
+def _load_workspace_contract_module():
+    skill_script = (
+        WORKSPACE_ROOT
+        / ".agent"
+        / "skills"
+        / "ai-sinology"
+        / "scripts"
+        / "workspace_contract.py"
+    )
+    spec = spec_from_file_location("ai_sinology_workspace_contract", skill_script)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载 Skill 工作区契约脚本: {skill_script}")
+    sys.path.insert(0, str(skill_script.parent))
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if sys.path and sys.path[0] == str(skill_script.parent):
+            sys.path.pop(0)
+    return module
+
+
+_WORKSPACE_CONTRACT_MODULE = _load_workspace_contract_module()
+inspect_project = _WORKSPACE_CONTRACT_MODULE.inspect_project
+list_projects = _WORKSPACE_CONTRACT_MODULE.list_projects
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="确认阶段二调研范围，统计正文规模，并写入 outputs/<project>/2_stage2_manifest.json。"
+        description="确认阶段二调研范围，统计正文规模，并写入 outputs/<project>/_stage2/2_stage2_manifest.json。"
     )
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
     parser.add_argument("--project", help="输出目录下的项目名。")
@@ -83,15 +109,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="可选 .env 文件路径；默认读取当前工作目录下的 .env，并写入模型槽位摘要。",
     )
     parser.add_argument("--no-write", action="store_true", help="只预览 manifest，不写文件。")
-    parser.add_argument("--run", action="store_true", help="写入 manifest/session 后直接执行阶段二筛读。")
+    parser.add_argument("--run", action="store_true", help="显式要求在配置后执行阶段二筛读。")
+    parser.add_argument(
+        "--setup-only",
+        action="store_true",
+        help="只完成阶段二配置，不启动实际筛读。",
+    )
     parser.add_argument(
         "--max-fragments",
         type=int,
         help="执行模式下最多读取多少个分页 fragment；默认不限。",
     )
-    parser.add_argument("--llm1-workers", type=int, default=4, help="执行模式下 llm1 并发数。")
-    parser.add_argument("--llm2-workers", type=int, default=4, help="执行模式下 llm2 并发数。")
-    parser.add_argument("--llm3-workers", type=int, default=2, help="执行模式下 llm3 并发数。")
+    parser.add_argument("--llm1-workers", type=int, default=4, help="执行模式下 llm1 并发上限；实际并发会受 RPM/TPM 与 key 数量限制。")
+    parser.add_argument("--llm2-workers", type=int, default=4, help="执行模式下 llm2 并发上限；实际并发会受 RPM/TPM 与 key 数量限制。")
+    parser.add_argument("--llm3-workers", type=int, default=2, help="执行模式下 llm3 并发上限；实际并发会受 RPM/TPM 与 key 数量限制。")
     parser.add_argument("--force-rerun", action="store_true", help="忽略已缓存的 target 产物并重跑。")
     parser.add_argument(
         "--checkpoint-action",
@@ -330,7 +361,7 @@ def _build_session_payload(
         "project_dir": str(project_dir),
         "stage2_workspace_dir": str(stage2_workspace_dir(project_dir)),
         "manifest_path": str(manifest_output_path) if manifest_output_path else "",
-        "workspace_manifest_path": str(stage2_workspace_dir(project_dir) / "manifest.json"),
+        "workspace_manifest_path": str(manifest_output_path) if manifest_output_path else "",
         "proposal_path": str(stage2_context.proposal_path),
         "journal_path": str(stage2_context.journal_path) if stage2_context.journal_path else "",
         "research_question": stage2_context.research_question,
@@ -471,6 +502,16 @@ def _build_progress_printer(*, as_json: bool):
     return emit
 
 
+def _should_run_stage2(args: argparse.Namespace) -> bool:
+    if args.no_write or args.setup_only:
+        return False
+    if args.run:
+        return True
+    if args.json:
+        return False
+    return True
+
+
 def main() -> int:
     args = build_parser().parse_args()
     outputs_root = _resolve_runtime_path(args.outputs, default_relative="outputs")
@@ -481,6 +522,8 @@ def main() -> int:
         return _handle_checkpoint_command(args, outputs_root)
     if args.run and args.no_write:
         raise SystemExit("--run 不能与 --no-write 同时使用。")
+    if args.run and args.setup_only:
+        raise SystemExit("--run 不能与 --setup-only 同时使用。")
 
     project_name = args.project or _pick_project(outputs_root)
     project_dir, stage2_context = _resolve_project(outputs_root, project_name)
@@ -543,14 +586,16 @@ def main() -> int:
             ),
         )
 
-    if not (args.run and args.json):
+    should_run = _should_run_stage2(args)
+
+    if not (should_run and args.json):
         _emit_summary(
             manifest,
             manifest_output_path=manifest_output_path,
             session_output_path=session_output_path,
             as_json=args.json,
         )
-    if args.run:
+    if should_run:
         summary = run_stage2_pipeline(
             project_dir=project_dir,
             dotenv_path=_resolved_env_file(args.env_file),

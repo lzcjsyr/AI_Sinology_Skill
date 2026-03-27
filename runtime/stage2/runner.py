@@ -8,15 +8,15 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
-from threading import Lock
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .api_config import STAGE2_RUNTIME_DEFAULTS, screening_batch_char_limit, slot_payload
+from .api_config import screening_batch_char_limit, slot_payload
 from .catalog import PAGE_MARKER_PATTERN, AnalysisTargetSelection, ResolvedAnalysisTarget, resolve_analysis_targets
 from .io_utils import append_jsonl, read_json, read_jsonl, write_json, write_jsonl, write_yaml
+from .rate_control import RateControllerRegistry, SlotRateController, estimate_request_tokens
 from .session import (
     analysis_targets_from_session,
     load_stage2_session,
@@ -270,27 +270,47 @@ def _build_chat_url(base_url: str) -> str:
 class OpenAICompatClient:
     """极简 OpenAI-compatible 客户端，避免额外依赖。"""
 
-    def __init__(self, *, model: str, base_url: str, api_keys: tuple[str, ...], slot: str) -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        api_keys: tuple[str, ...],
+        slot: str,
+        rate_controller: SlotRateController | None = None,
+    ) -> None:
         if not api_keys:
             raise Stage2RunnerError(f"{slot} 未配置 API key。")
         self.model = model
         self.base_url = base_url
         self.api_keys = api_keys
         self.slot = slot
-        self._lock = Lock()
-        self._cursor = 0
+        self.rate_controller = rate_controller
 
-    def _next_api_key(self) -> str:
-        with self._lock:
-            key = self.api_keys[self._cursor % len(self.api_keys)]
-            self._cursor += 1
-            return key
+    def effective_worker_limit(self, *, requested_workers: int, estimated_tokens: int) -> int:
+        if self.rate_controller is None:
+            return max(1, int(requested_workers))
+        return self.rate_controller.effective_worker_limit(
+            requested_workers=requested_workers,
+            estimated_tokens=estimated_tokens,
+        )
 
-    def _request(self, *, payload: dict[str, Any], allow_response_format: bool = True) -> dict[str, Any]:
+    def _request(
+        self,
+        *,
+        payload: dict[str, Any],
+        estimated_tokens: int,
+        allow_response_format: bool = True,
+    ) -> dict[str, Any]:
         body = dict(payload)
         if not allow_response_format:
             body.pop("response_format", None)
-        api_key = self._next_api_key()
+        reservation = (
+            self.rate_controller.acquire(estimated_tokens=estimated_tokens)
+            if self.rate_controller is not None
+            else None
+        )
+        api_key = reservation.api_key if reservation is not None else self.api_keys[0]
         request = Request(
             _build_chat_url(self.base_url),
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -302,13 +322,30 @@ class OpenAICompatClient:
         )
         try:
             with urlopen(request, timeout=180) as response:
-                return json.loads(response.read().decode("utf-8"))
+                response_payload = json.loads(response.read().decode("utf-8"))
+                if reservation is not None:
+                    usage = response_payload.get("usage") or {}
+                    self.rate_controller.finalize(
+                        reservation,
+                        actual_tokens=int(usage.get("total_tokens") or estimated_tokens),
+                    )
+                return response_payload
         except HTTPError as exc:
             message = exc.read().decode("utf-8", errors="ignore")
             if allow_response_format and exc.code in {400, 404, 422}:
-                return self._request(payload=payload, allow_response_format=False)
+                if reservation is not None:
+                    self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
+                return self._request(
+                    payload=payload,
+                    estimated_tokens=estimated_tokens,
+                    allow_response_format=False,
+                )
+            if reservation is not None:
+                self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
             raise Stage2RunnerError(f"{self.slot} 请求失败: HTTP {exc.code} {message[:500]}") from exc
         except URLError as exc:
+            if reservation is not None:
+                self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
             raise Stage2RunnerError(f"{self.slot} 网络错误: {exc}") from exc
 
     def chat_json(
@@ -325,7 +362,11 @@ class OpenAICompatClient:
             "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
         }
-        response = self._request(payload=payload, allow_response_format=True)
+        response = self._request(
+            payload=payload,
+            estimated_tokens=estimate_request_tokens(messages=messages, max_tokens=max_tokens),
+            allow_response_format=True,
+        )
         choices = response.get("choices") or []
         if not choices:
             raise Stage2RunnerError(f"{self.slot} 未返回 choices。")
@@ -747,8 +788,14 @@ def _run_slot_batches(
 
     batch_map = {batch.batch_id: batch for batch in batches}
     finished_count = len(cached)
-    max_workers = max(1, int(workers))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    effective_workers = client.effective_worker_limit(
+        requested_workers=workers,
+        estimated_tokens=max(
+            estimate_request_tokens(messages=_screening_messages(target_themes=target_themes, batch=batch), max_tokens=5000)
+            for batch in pending_batches
+        ),
+    )
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         pending = {
             executor.submit(_screen_batch, client=client, slot=slot, batch=batch, target_themes=target_themes): batch
             for batch in pending_batches
@@ -912,7 +959,22 @@ def _run_arbitration(
             total=len(disputes),
         )
     if pending_disputes:
-        with ThreadPoolExecutor(max_workers=max(1, int(workers))) as executor:
+        effective_workers = client.effective_worker_limit(
+            requested_workers=workers,
+            estimated_tokens=max(
+                estimate_request_tokens(
+                    messages=_arbitration_messages(
+                        theme=str(dispute["matched_theme"]),
+                        original_text=str(dispute["original_text"]),
+                        llm1_result=dispute["llm1_result"],
+                        llm2_result=dispute["llm2_result"],
+                    ),
+                    max_tokens=1200,
+                )
+                for dispute in pending_disputes
+            ),
+        )
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
             pending = {
                 executor.submit(_arbitrate_dispute, client=client, dispute=dispute): dispute
                 for dispute in pending_disputes
@@ -1046,6 +1108,7 @@ def _clear_target_workspace(target_dir: Path) -> None:
 
 def _build_clients(*, dotenv_path: str | Path | None) -> dict[str, OpenAICompatClient]:
     clients: dict[str, OpenAICompatClient] = {}
+    registry = RateControllerRegistry()
     for slot in ("llm1", "llm2", "llm3"):
         payload = slot_payload(slot, dotenv_path=dotenv_path)
         clients[slot] = OpenAICompatClient(
@@ -1053,6 +1116,7 @@ def _build_clients(*, dotenv_path: str | Path | None) -> dict[str, OpenAICompatC
             base_url=str(payload["base_url"]),
             api_keys=tuple(str(key) for key in payload["api_keys"] or () if str(key).strip()),
             slot=slot,
+            rate_controller=registry.get(payload),
         )
     return clients
 

@@ -16,9 +16,8 @@
 1. 用 `$ai-sinology` 或 `python3 .agent/skills/ai-sinology/scripts/init_project.py <project>` 创建 `outputs/<project>/` 和 `project_progress.yaml`
 2. 完成阶段一，生成 `1_journal_targeting.md` 与 `1_research_proposal.md`；建议在 front matter 中显式写入 `stage2_retrieval_themes`
 3. 运行 `python3 -m runtime.stage2.cli`，从阶段一输入出发读取检索主题并确认阶段二原始文献检索范围，生成：
-   - `outputs/<project>/2_stage2_manifest.json`
+   - `outputs/<project>/_stage2/2_stage2_manifest.json`
    - `outputs/<project>/_stage2/session.json`
-   - `outputs/<project>/_stage2/manifest.json`
 4. 运行阶段二 CLI，直接执行 Kanripo 原始文献勘查，并写回 `outputs/<project>/2_primary_corpus.yaml`
 5. 回到 Skill 内推进阶段三：
    - `3A` 生成 `3a_deepened_thinking.md`
@@ -55,10 +54,9 @@
 │       ├── 1_journal_targeting.md
 │       ├── 1_research_proposal.md
 │       ├── 2_primary_corpus.yaml
-│       ├── 2_stage2_manifest.json
 │       ├── _stage2/
+│       │   ├── 2_stage2_manifest.json
 │       │   ├── session.json
-│       │   └── manifest.json
 │       ├── 3a_deepened_thinking.md
 │       ├── 3c_scholarship_map.yaml
 │       ├── _stage3b/
@@ -88,8 +86,9 @@ python3 .agent/skills/ai-sinology/scripts/sync_progress.py demo
 
 python3 -m runtime.stage2.cli --project demo --kanripo-root /path/to/kanripo_repos
 python3 -m runtime.stage2.cli --project demo --targets KR3j0160,KR3j0161 --env-file .env
-python3 -m runtime.stage2.cli --project demo --targets KR4c --env-file .env --run
-python3 -m runtime.stage2.cli --project demo --targets KR4c --env-file .env --run --llm1-workers 4 --llm2-workers 4 --llm3-workers 2
+python3 -m runtime.stage2.cli --project demo --targets KR4c --env-file .env
+python3 -m runtime.stage2.cli --project demo --targets KR4c --env-file .env --llm1-workers 4 --llm2-workers 4 --llm3-workers 2
+python3 -m runtime.stage2.cli --project demo --targets KR4c --env-file .env --setup-only
 python3 -m runtime.stage2.cli --project demo --show-checkpoint
 python3 -m runtime.stage2.cli --project demo --checkpoint-action start --checkpoint-target KR3j0160
 python3 -m runtime.stage2.cli --project demo --checkpoint-action checkpoint --checkpoint-cursor offset=120 --checkpoint-piece-id pb:KR3j0160_010-2b --checkpoint-piece-delta 5
@@ -114,7 +113,7 @@ pytest
 - `retrieval_progress.last_piece_id`
 - `retrieval_progress.completed_piece_count`
 
-当使用 `--run` 时，阶段二会进一步执行：
+默认交互模式下，阶段二在确认 `analysis_targets` 后会直接开始执行；只有显式使用 `--setup-only` 时，才只写入 manifest/session 不进入筛读。执行阶段会进一步完成：
 
 - 解析 `analysis_targets` 对应的 Kanripo 正文分页，写入 `_stage2/targets/<target>/fragments.jsonl`
 - 按批次将正文送入 `llm1` 与 `llm2` 独立筛读，分别保存 `llm1_screening.jsonl` 与 `llm2_screening.jsonl`

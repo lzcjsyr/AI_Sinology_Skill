@@ -11,7 +11,7 @@
 ## 输出
 
 - `outputs/<project>/2_primary_corpus.yaml`
-- 推荐：`outputs/<project>/2_stage2_manifest.json`
+- 推荐：`outputs/<project>/_stage2/2_stage2_manifest.json`
 - 过程目录：`outputs/<project>/_stage2/`
 
 ## 目标
@@ -53,7 +53,7 @@ Skill 真正依赖的字段只有：
 ## `_stage2/` 工作目录建议内容
 
 - `session.json`
-- `manifest.json`
+- `2_stage2_manifest.json`
 - 外部执行器自己产生的中间结果、日志或缓存
 
 `session.json` 至少应持续更新：

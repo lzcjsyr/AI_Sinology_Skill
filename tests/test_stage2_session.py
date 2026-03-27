@@ -176,7 +176,7 @@ class Stage2SessionTests(unittest.TestCase):
         self.assertEqual(manifest["corpus_overview"]["text_char_count"], 12345)
         self.assertEqual(len(manifest["model_slots"]), 3)
         self.assertTrue(manifest["stage2_session_path"].endswith("/_stage2/session.json"))
-        self.assertTrue(manifest["stage2_workspace_manifest_path"].endswith("/_stage2/manifest.json"))
+        self.assertTrue(manifest["stage2_workspace_manifest_path"].endswith("/_stage2/2_stage2_manifest.json"))
 
     def test_build_stage2_manifest_does_not_leak_process_env_when_env_values_are_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -211,7 +211,7 @@ class Stage2SessionTests(unittest.TestCase):
         assert stage2_context is not None
         self.assertTrue(all(not slot["has_api_key"] for slot in manifest["model_slots"]))
 
-    def test_stage2_workspace_persists_session_and_manifest_mirror(self) -> None:
+    def test_stage2_workspace_persists_session_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "demo"
             project_dir.mkdir()
@@ -236,6 +236,7 @@ class Stage2SessionTests(unittest.TestCase):
             self.assertTrue(root_manifest.exists())
             self.assertTrue(stage2_workspace_manifest_path(project_dir).exists())
             self.assertTrue(stage2_session_path(project_dir).exists())
+            self.assertEqual(root_manifest, stage2_workspace_manifest_path(project_dir))
             self.assertEqual(loaded_session["status"], "configured")
             self.assertEqual(loaded_session["analysis_targets"], ["KR3j0160"])
             self.assertEqual(loaded_session["retrieval_progress"]["pending_targets"], ["KR3j0160"])

@@ -14,7 +14,7 @@ from .catalog import normalize_scope
 
 STAGE2_MANIFEST_FILE = "2_stage2_manifest.json"
 STAGE2_WORKSPACE_DIR = "_stage2"
-STAGE2_WORKSPACE_MANIFEST_FILE = "manifest.json"
+STAGE2_WORKSPACE_MANIFEST_FILE = STAGE2_MANIFEST_FILE
 STAGE2_SESSION_FILE = "session.json"
 RETRIEVAL_PROGRESS_VERSION = 1
 
@@ -563,14 +563,12 @@ def build_stage2_manifest(
 
 
 def manifest_path(project_dir: str | Path) -> Path:
-    return Path(project_dir).expanduser().resolve() / STAGE2_MANIFEST_FILE
+    return stage2_workspace_dir(project_dir) / STAGE2_MANIFEST_FILE
 
 
 def write_stage2_manifest(project_dir: str | Path, payload: dict[str, Any]) -> Path:
     ensure_stage2_workspace(project_dir)
     path = manifest_path(project_dir)
-    workspace_manifest = stage2_workspace_manifest_path(project_dir)
     content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     path.write_text(content, encoding="utf-8")
-    workspace_manifest.write_text(content, encoding="utf-8")
     return path
