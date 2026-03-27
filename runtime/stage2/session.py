@@ -8,14 +8,14 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .api_config import STAGE3_MODELS, merged_env, slot_payload
+from .api_config import STAGE2_MODELS, merged_env, slot_payload
 from .catalog import normalize_scope
 
 
-STAGE3_MANIFEST_FILE = "2_stage2_manifest.json"
-STAGE3_WORKSPACE_DIR = "_stage2"
-STAGE3_WORKSPACE_MANIFEST_FILE = "manifest.json"
-STAGE3_SESSION_FILE = "session.json"
+STAGE2_MANIFEST_FILE = "2_stage2_manifest.json"
+STAGE2_WORKSPACE_DIR = "_stage2"
+STAGE2_WORKSPACE_MANIFEST_FILE = "manifest.json"
+STAGE2_SESSION_FILE = "session.json"
 RETRIEVAL_PROGRESS_VERSION = 1
 
 
@@ -26,11 +26,13 @@ class ThemeItem:
 
 
 @dataclass(frozen=True)
-class Stage3Context:
+class Stage2Context:
     proposal_path: Path
     journal_path: Path | None
     idea: str
     research_question: str
+    retrieval_theme_source: str
+    retrieval_themes: tuple[ThemeItem, ...]
     target_themes: tuple[ThemeItem, ...]
 
 
@@ -76,20 +78,48 @@ def read_text_lines(path_like: str | Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
-def parse_frontmatter(path_like: str | Path) -> dict[str, str]:
+def parse_frontmatter(path_like: str | Path) -> dict[str, Any]:
     lines = read_text_lines(path_like)
     if not lines or lines[0].strip() != "---":
         return {}
 
-    payload: dict[str, str] = {}
-    for line in lines[1:]:
+    payload: dict[str, Any] = {}
+    index = 1
+    while index < len(lines):
+        line = lines[index]
         stripped = line.strip()
         if stripped == "---":
             break
         if ":" not in line:
+            index += 1
             continue
         key, value = line.split(":", 1)
-        payload[key.strip()] = _strip_quotes(value)
+        normalized_key = key.strip()
+        normalized_value = value.strip()
+        if normalized_value:
+            payload[normalized_key] = _strip_quotes(normalized_value)
+            index += 1
+            continue
+
+        items: list[str] = []
+        index += 1
+        while index < len(lines):
+            nested_line = lines[index]
+            nested_stripped = nested_line.strip()
+            if nested_stripped == "---":
+                break
+            if not nested_stripped:
+                index += 1
+                continue
+            if nested_line.lstrip() == nested_line and ":" in nested_line:
+                break
+            if nested_stripped.startswith("- "):
+                item = _strip_quotes(nested_stripped[2:])
+                if item:
+                    items.append(item)
+            index += 1
+        payload[normalized_key] = items
+        continue
     return payload
 
 
@@ -114,8 +144,56 @@ def extract_first_sentence(path_like: str | Path) -> str:
     return ""
 
 
-def infer_target_themes(*, research_question: str, idea: str, settled_direction: str) -> list[ThemeItem]:
+def _frontmatter_string_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [_strip_quotes(str(item)) for item in value if _strip_quotes(str(item))]
+    text = _strip_quotes(str(value or ""))
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+        except Exception:  # noqa: BLE001
+            parsed = None
+        if isinstance(parsed, list):
+            return [_strip_quotes(str(item)) for item in parsed if _strip_quotes(str(item))]
+    return [text]
+
+
+def _resolve_stage2_retrieval_themes(*frontmatters: dict[str, Any]) -> list[str]:
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for frontmatter in frontmatters:
+        for key in ("stage2_retrieval_themes", "retrieval_themes"):
+            for item in _frontmatter_string_list(frontmatter.get(key)):
+                if item in seen:
+                    continue
+                seen.add(item)
+                resolved.append(item)
+    return resolved
+
+
+def infer_target_themes(
+    *,
+    retrieval_themes: list[str] | tuple[str, ...] | None = None,
+    research_question: str,
+    idea: str,
+    settled_direction: str,
+) -> tuple[list[ThemeItem], str]:
     themes: list[ThemeItem] = []
+    explicit_themes = [str(item).strip() for item in retrieval_themes or [] if str(item).strip()]
+    if explicit_themes:
+        for theme in explicit_themes:
+            if any(item.theme == theme for item in themes):
+                continue
+            themes.append(
+                ThemeItem(
+                    theme=theme,
+                    description="阶段一明确给出的阶段二检索主题。",
+                )
+            )
+        return themes, "stage1_frontmatter"
+
     for raw in (settled_direction, idea, research_question):
         theme = str(raw or "").strip()
         if not theme or any(item.theme == theme for item in themes):
@@ -126,10 +204,10 @@ def infer_target_themes(*, research_question: str, idea: str, settled_direction:
                 description="基于阶段一初步想法与研究方向提炼的初始主题。",
             )
         )
-    return themes
+    return themes, "stage1_inference"
 
 
-def load_stage3_context(project_dir: str | Path) -> Stage3Context | None:
+def load_stage2_context(project_dir: str | Path) -> Stage2Context | None:
     project_path = Path(project_dir).expanduser().resolve()
     proposal_path = project_path / "1_research_proposal.md"
     if not proposal_path.exists():
@@ -148,17 +226,21 @@ def load_stage3_context(project_dir: str | Path) -> Stage3Context | None:
         "settled_research_direction",
         "",
     )
-    target_themes = infer_target_themes(
+    retrieval_themes = _resolve_stage2_retrieval_themes(proposal_frontmatter, journal_frontmatter)
+    target_themes, retrieval_theme_source = infer_target_themes(
+        retrieval_themes=retrieval_themes,
         research_question=research_question,
         idea=idea,
         settled_direction=settled_direction,
     )
 
-    return Stage3Context(
+    return Stage2Context(
         proposal_path=proposal_path,
         journal_path=journal_path if journal_path.exists() else None,
         idea=idea,
         research_question=research_question,
+        retrieval_theme_source=retrieval_theme_source,
+        retrieval_themes=tuple(target_themes),
         target_themes=tuple(target_themes),
     )
 
@@ -168,9 +250,9 @@ def slot_summaries(
     dotenv_path: str | Path | None = None,
     env_values: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    resolved_env = env_values or merged_env(dotenv_path)
+    resolved_env = env_values if env_values is not None else merged_env(dotenv_path)
     payloads: list[dict[str, Any]] = []
-    for slot in sorted(STAGE3_MODELS.keys()):
+    for slot in sorted(STAGE2_MODELS.keys()):
         payload = slot_payload(slot, env_values=resolved_env)
         payloads.append(
             {
@@ -237,7 +319,7 @@ def reconcile_retrieval_progress(
     }
 
 
-def normalize_stage3_session(payload: dict[str, Any]) -> dict[str, Any]:
+def normalize_stage2_session(payload: dict[str, Any]) -> dict[str, Any]:
     content = dict(payload)
     analysis_targets = normalize_analysis_targets(_as_string_list(content.get("analysis_targets")))
     raw_progress = content.get("retrieval_progress")
@@ -363,7 +445,7 @@ def summarize_retrieval_progress(progress: dict[str, Any] | None) -> str:
     )
 
 
-def update_stage3_session_checkpoint(
+def update_stage2_session_checkpoint(
     project_dir: str | Path,
     *,
     action: str,
@@ -373,7 +455,7 @@ def update_stage3_session_checkpoint(
     note: str | None = None,
     completed_piece_delta: int = 0,
 ) -> dict[str, Any]:
-    session_payload = load_stage3_session(project_dir)
+    session_payload = load_stage2_session(project_dir)
     analysis_targets = analysis_targets_from_session(session_payload)
     session_payload["retrieval_progress"] = update_retrieval_progress(
         analysis_targets,
@@ -385,49 +467,49 @@ def update_stage3_session_checkpoint(
         note=note,
         completed_piece_delta=completed_piece_delta,
     )
-    save_stage3_session(project_dir, session_payload)
+    save_stage2_session(project_dir, session_payload)
     return session_payload
 
 
-def stage3_workspace_dir(project_dir: str | Path) -> Path:
-    return Path(project_dir).expanduser().resolve() / STAGE3_WORKSPACE_DIR
+def stage2_workspace_dir(project_dir: str | Path) -> Path:
+    return Path(project_dir).expanduser().resolve() / STAGE2_WORKSPACE_DIR
 
 
-def ensure_stage3_workspace(project_dir: str | Path) -> Path:
-    path = stage3_workspace_dir(project_dir)
+def ensure_stage2_workspace(project_dir: str | Path) -> Path:
+    path = stage2_workspace_dir(project_dir)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def stage3_workspace_manifest_path(project_dir: str | Path) -> Path:
-    return stage3_workspace_dir(project_dir) / STAGE3_WORKSPACE_MANIFEST_FILE
+def stage2_workspace_manifest_path(project_dir: str | Path) -> Path:
+    return stage2_workspace_dir(project_dir) / STAGE2_WORKSPACE_MANIFEST_FILE
 
 
-def stage3_session_path(project_dir: str | Path) -> Path:
-    return stage3_workspace_dir(project_dir) / STAGE3_SESSION_FILE
+def stage2_session_path(project_dir: str | Path) -> Path:
+    return stage2_workspace_dir(project_dir) / STAGE2_SESSION_FILE
 
 
-def load_stage3_session(project_dir: str | Path) -> dict[str, Any]:
-    path = stage3_session_path(project_dir)
+def load_stage2_session(project_dir: str | Path) -> dict[str, Any]:
+    path = stage2_session_path(project_dir)
     if not path.exists():
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
-    return normalize_stage3_session(payload) if isinstance(payload, dict) else {}
+    return normalize_stage2_session(payload) if isinstance(payload, dict) else {}
 
 
-def save_stage3_session(project_dir: str | Path, payload: dict[str, Any]) -> Path:
-    ensure_stage3_workspace(project_dir)
-    path = stage3_session_path(project_dir)
-    content = normalize_stage3_session(payload)
+def save_stage2_session(project_dir: str | Path, payload: dict[str, Any]) -> Path:
+    ensure_stage2_workspace(project_dir)
+    path = stage2_session_path(project_dir)
+    content = normalize_stage2_session(payload)
     content["updated_at"] = _now_iso()
     path.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return path
 
 
-def build_stage3_manifest(
+def build_stage2_manifest(
     *,
     workspace_root: str | Path,
     outputs_root: str | Path,
@@ -435,14 +517,14 @@ def build_stage3_manifest(
     kanripo_root: str | Path,
     analysis_targets: list[str],
     corpus_overview: dict[str, Any],
-    stage3_context: Stage3Context,
+    stage2_context: Stage2Context,
     dotenv_path: str | Path | None = None,
     env_values: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     workspace = Path(workspace_root).expanduser().resolve()
     outputs = Path(outputs_root).expanduser().resolve()
     project_dir = outputs / project_name
-    stage3_dir = stage3_workspace_dir(project_dir)
+    stage2_dir = stage2_workspace_dir(project_dir)
     return {
         "stage2_manifest_version": 2,
         "generated_at": _now_iso(),
@@ -450,20 +532,28 @@ def build_stage3_manifest(
         "outputs_root": str(outputs),
         "project_name": project_name,
         "project_dir": str(project_dir),
-        "stage2_workspace_dir": str(stage3_dir),
-        "stage2_session_path": str(stage3_session_path(project_dir)),
-        "stage2_workspace_manifest_path": str(stage3_workspace_manifest_path(project_dir)),
-        "proposal_path": str(stage3_context.proposal_path),
-        "journal_path": str(stage3_context.journal_path) if stage3_context.journal_path else "",
-        "research_question": stage3_context.research_question,
-        "idea": stage3_context.idea,
+        "stage2_workspace_dir": str(stage2_dir),
+        "stage2_session_path": str(stage2_session_path(project_dir)),
+        "stage2_workspace_manifest_path": str(stage2_workspace_manifest_path(project_dir)),
+        "proposal_path": str(stage2_context.proposal_path),
+        "journal_path": str(stage2_context.journal_path) if stage2_context.journal_path else "",
+        "research_question": stage2_context.research_question,
+        "idea": stage2_context.idea,
         "theme_source": "stage1_proposal",
+        "retrieval_theme_source": stage2_context.retrieval_theme_source,
+        "retrieval_themes": [
+            {
+                "theme": item.theme,
+                "description": item.description,
+            }
+            for item in stage2_context.retrieval_themes
+        ],
         "target_themes": [
             {
                 "theme": item.theme,
                 "description": item.description,
             }
-            for item in stage3_context.target_themes
+            for item in stage2_context.target_themes
         ],
         "kanripo_root": str(Path(kanripo_root).expanduser().resolve()),
         "analysis_targets": normalize_analysis_targets(analysis_targets),
@@ -473,13 +563,13 @@ def build_stage3_manifest(
 
 
 def manifest_path(project_dir: str | Path) -> Path:
-    return Path(project_dir).expanduser().resolve() / STAGE3_MANIFEST_FILE
+    return Path(project_dir).expanduser().resolve() / STAGE2_MANIFEST_FILE
 
 
-def write_stage3_manifest(project_dir: str | Path, payload: dict[str, Any]) -> Path:
-    ensure_stage3_workspace(project_dir)
+def write_stage2_manifest(project_dir: str | Path, payload: dict[str, Any]) -> Path:
+    ensure_stage2_workspace(project_dir)
     path = manifest_path(project_dir)
-    workspace_manifest = stage3_workspace_manifest_path(project_dir)
+    workspace_manifest = stage2_workspace_manifest_path(project_dir)
     content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     path.write_text(content, encoding="utf-8")
     workspace_manifest.write_text(content, encoding="utf-8")

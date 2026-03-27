@@ -19,6 +19,7 @@ class StageDefinition:
     name: str
     required_all: tuple[str, ...] = ()
     required_any: tuple[str, ...] = ()
+    required_nonempty_dirs: tuple[str, ...] = ()
     recommended: tuple[str, ...] = ()
 
 
@@ -68,6 +69,7 @@ def stage_definitions() -> tuple[StageDefinition, ...]:
                 name=str(raw_stage["name"]),
                 required_all=tuple(raw_stage.get("required_all", [])),
                 required_any=tuple(raw_stage.get("required_any", [])),
+                required_nonempty_dirs=tuple(raw_stage.get("required_nonempty_dirs", [])),
                 recommended=tuple(raw_stage.get("recommended", [])),
             )
         )
@@ -86,18 +88,54 @@ def _existing(project_dir: Path, names: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(name for name in names if (project_dir / name).exists())
 
 
+def _has_visible_material(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    for item in path.rglob("*"):
+        if not item.is_file():
+            continue
+        relative_parts = item.relative_to(path).parts
+        if any(part.startswith(".") for part in relative_parts):
+            continue
+        if item.name in {".gitkeep", ".DS_Store"}:
+            continue
+        return True
+    return False
+
+
+def _existing_nonempty_dirs(project_dir: Path, names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(name for name in names if _has_visible_material(project_dir / name))
+
+
+def _nonempty_dir_requirement_label(path: str) -> str:
+    return f"{path}（目录内需至少有 1 份人工导入材料）"
+
+
 def inspect_stage(project_dir: Path, definition: StageDefinition) -> StageSnapshot:
     present_required_all = _existing(project_dir, definition.required_all)
     present_required_any = _existing(project_dir, definition.required_any)
+    present_required_nonempty_dirs = _existing_nonempty_dirs(project_dir, definition.required_nonempty_dirs)
     present_recommended = _existing(project_dir, definition.recommended)
 
     missing_required = tuple(name for name in definition.required_all if name not in present_required_all)
+    missing_required = missing_required + tuple(
+        _nonempty_dir_requirement_label(name)
+        for name in definition.required_nonempty_dirs
+        if name not in present_required_nonempty_dirs
+    )
     any_satisfied = not definition.required_any or bool(present_required_any)
     if definition.required_any and not present_required_any:
         missing_required = missing_required + definition.required_any
 
     complete = not missing_required and any_satisfied
-    present_files = tuple(dict.fromkeys(present_required_all + present_required_any + present_recommended))
+    present_files = tuple(
+        dict.fromkeys(
+            present_required_all
+            + present_required_any
+            + present_required_nonempty_dirs
+            + present_recommended
+        )
+    )
     if complete:
         status = "complete"
     elif present_files:

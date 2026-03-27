@@ -1,4 +1,4 @@
-"""桥接 skill 内部 workspace_contract，供 Stage3 外部运行时代码复用。"""
+"""桥接 skill 内部 workspace_contract，供阶段二外部运行时代码复用。"""
 
 from __future__ import annotations
 

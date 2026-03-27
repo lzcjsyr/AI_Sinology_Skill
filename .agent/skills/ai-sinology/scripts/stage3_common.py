@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-# Shared helpers for the secondary-literature intake scripts.
-# The script filenames keep their historical names, but the default
-# workspace now maps to Stage 3B.
+# Shared helpers for the Stage 3 secondary-literature scripts.
 
 from datetime import datetime
 import json
@@ -41,10 +39,6 @@ def ensure_stage3b_dir(project: str, outputs_root: str | Path) -> Path:
     target = root / project / "_stage3b"
     target.mkdir(parents=True, exist_ok=True)
     return target
-
-
-def ensure_stage2a_dir(project: str, outputs_root: str | Path) -> Path:
-    return ensure_stage3b_dir(project, outputs_root)
 
 
 def load_json(path: str | Path) -> Any:

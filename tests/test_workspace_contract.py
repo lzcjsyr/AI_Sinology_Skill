@@ -42,7 +42,7 @@ class WorkspaceContractTests(unittest.TestCase):
             project.mkdir()
             (project / "1_journal_targeting.md").write_text("ok\n", encoding="utf-8")
             (project / "1_research_proposal.md").write_text("ok\n", encoding="utf-8")
-            (project / "2b_scholarship_map.yaml").write_text("research_question: \"x\"\n", encoding="utf-8")
+            (project / "2_primary_corpus.yaml").write_text("piece_count: 1\nrecords: []\n", encoding="utf-8")
 
             status = inspect_project(outputs, "demo")
 
@@ -50,6 +50,55 @@ class WorkspaceContractTests(unittest.TestCase):
         self.assertEqual(status.next_stage, 3)
         self.assertFalse(status.has_progress_file)
         self.assertEqual(status.stages[2].status, "missing")
+
+    def test_stage_three_requires_candidate_list_and_manual_papers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = Path(tmpdir)
+            project = outputs / "demo"
+            project.mkdir(parents=True)
+            for name in (
+                "1_journal_targeting.md",
+                "1_research_proposal.md",
+                "2_primary_corpus.yaml",
+                "3a_deepened_thinking.md",
+                "3c_scholarship_map.yaml",
+            ):
+                (project / name).write_text("ok\n", encoding="utf-8")
+            (project / "_stage3b" / "papers").mkdir(parents=True)
+
+            status = inspect_project(outputs, "demo")
+
+        self.assertEqual(status.highest_completed_stage, 2)
+        self.assertEqual(status.next_stage, 3)
+        self.assertEqual(status.stages[2].status, "partial")
+        self.assertIn("_stage3b/candidate_papers.md", status.stages[2].missing_required)
+        self.assertTrue(
+            any("_stage3b/papers" in item for item in status.stages[2].missing_required)
+        )
+
+    def test_stage_three_completes_after_manual_papers_are_imported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            outputs = Path(tmpdir)
+            project = outputs / "demo"
+            project.mkdir(parents=True)
+            for name in (
+                "1_journal_targeting.md",
+                "1_research_proposal.md",
+                "2_primary_corpus.yaml",
+                "3a_deepened_thinking.md",
+                "3c_scholarship_map.yaml",
+                "_stage3b/candidate_papers.md",
+            ):
+                (project / name).parent.mkdir(parents=True, exist_ok=True)
+                (project / name).write_text("ok\n", encoding="utf-8")
+            (project / "_stage3b" / "papers" / "core-paper.pdf").parent.mkdir(parents=True, exist_ok=True)
+            (project / "_stage3b" / "papers" / "core-paper.pdf").write_text("pdf\n", encoding="utf-8")
+
+            status = inspect_project(outputs, "demo")
+
+        self.assertEqual(status.highest_completed_stage, 3)
+        self.assertEqual(status.next_stage, 4)
+        self.assertEqual(status.stages[2].status, "complete")
 
     def test_stage_six_accepts_markdown_manuscript(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -60,8 +109,10 @@ class WorkspaceContractTests(unittest.TestCase):
                 "project_progress.yaml",
                 "1_journal_targeting.md",
                 "1_research_proposal.md",
-                "2b_scholarship_map.yaml",
-                "3_final_corpus.yaml",
+                "2_primary_corpus.yaml",
+                "3a_deepened_thinking.md",
+                "_stage3b/candidate_papers.md",
+                "3c_scholarship_map.yaml",
                 "4_outline_matrix.yaml",
                 "4_argument_audit.md",
                 "5_first_draft.md",
@@ -71,7 +122,10 @@ class WorkspaceContractTests(unittest.TestCase):
                 "6_anonymous_submission_checklist.md",
                 "6_claim_boundary.md",
             ):
+                (project / name).parent.mkdir(parents=True, exist_ok=True)
                 (project / name).write_text("ok\n", encoding="utf-8")
+            (project / "_stage3b" / "papers" / "core-paper.pdf").parent.mkdir(parents=True, exist_ok=True)
+            (project / "_stage3b" / "papers" / "core-paper.pdf").write_text("pdf\n", encoding="utf-8")
 
             status = inspect_project(outputs, "demo")
 

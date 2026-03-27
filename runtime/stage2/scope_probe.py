@@ -1,4 +1,4 @@
-"""列出、校验并统计 Stage3 可用的 Kanripo analysis_targets。"""
+"""列出、校验并统计阶段二可用的 Kanripo analysis_targets。"""
 
 from __future__ import annotations
 

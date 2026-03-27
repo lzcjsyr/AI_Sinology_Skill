@@ -3,11 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from runtime.stage3.api_config import resolve_provider_keys, slot_payload
+from runtime.stage2.api_config import resolve_provider_keys, slot_payload
 
 
-class Stage3ApiConfigTests(unittest.TestCase):
+class Stage2ApiConfigTests(unittest.TestCase):
     def test_resolve_provider_keys_merges_pool_and_primary_key(self) -> None:
         primary, pool = resolve_provider_keys(
             "volcengine",
@@ -30,6 +31,13 @@ class Stage3ApiConfigTests(unittest.TestCase):
         self.assertEqual(payload["provider"], "volcengine")
         self.assertEqual(payload["api_key"], "dotenv-key")
         self.assertEqual(payload["api_keys"], ("dotenv-key",))
+
+    def test_resolve_provider_keys_respects_explicit_empty_env_values(self) -> None:
+        with patch.dict("os.environ", {"VOLCENGINE_API_KEY": "from-os"}, clear=False):
+            primary, pool = resolve_provider_keys("volcengine", env_values={})
+
+        self.assertEqual(primary, "")
+        self.assertEqual(pool, ())
 
 
 if __name__ == "__main__":

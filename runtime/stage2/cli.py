@@ -1,4 +1,4 @@
-"""提供 Stage3 外部入口，负责确认调研范围并写入 manifest / session。"""
+"""提供阶段二外部入口，负责确认调研范围并写入 manifest / session。"""
 
 from __future__ import annotations
 
@@ -9,38 +9,38 @@ from typing import Any
 
 from .catalog import measure_corpus_overview, resolve_analysis_targets
 from .session import (
-    Stage3Context,
+    Stage2Context,
     analysis_targets_from_session,
-    build_stage3_manifest,
-    ensure_stage3_workspace,
-    load_stage3_context,
-    load_stage3_session,
-    save_stage3_session,
-    stage3_session_path,
-    stage3_workspace_dir,
+    build_stage2_manifest,
+    ensure_stage2_workspace,
+    load_stage2_context,
+    load_stage2_session,
+    save_stage2_session,
+    stage2_session_path,
+    stage2_workspace_dir,
     summarize_retrieval_progress,
-    update_stage3_session_checkpoint,
-    write_stage3_manifest,
+    update_stage2_session_checkpoint,
+    write_stage2_manifest,
 )
 from .skill_bridge import inspect_project, list_projects
 
 
 DEFAULT_KANRIPO_ROOT = "data/kanripo_repos"
 DEFAULT_ENV_FILE = ".env"
-SKILL_REFERENCES_DIR = (
+STAGE2_GUIDE_PATH = Path(__file__).resolve().parent / "docs" / "kanripo_family_guide.md"
+WORKSPACE_CONTRACT_PATH = (
     Path(__file__).resolve().parent.parent.parent
     / ".agent"
     / "skills"
     / "ai-sinology"
     / "references"
+    / "workspace-contract.md"
 )
-STAGE3_GUIDE_PATH = SKILL_REFERENCES_DIR / "stage3-handoff.md"
-WORKSPACE_CONTRACT_PATH = SKILL_REFERENCES_DIR / "workspace-contract.md"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="确认阶段三调研范围，统计正文规模，并写入 outputs/<project>/3_stage3_manifest.json。"
+        description="确认阶段二调研范围，统计正文规模，并写入 outputs/<project>/2_stage2_manifest.json。"
     )
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
     parser.add_argument("--project", help="输出目录下的项目名。")
@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint-action",
         choices=("start", "checkpoint", "pause", "complete", "reset"),
-        help="直接更新 outputs/<project>/_stage3/session.json 中的检索断点，不重新进入配置流程。",
+        help="直接更新 outputs/<project>/_stage2/session.json 中的检索断点，不重新进入配置流程。",
     )
     parser.add_argument("--checkpoint-target", help="断点操作对应的当前检索目标，如 KR1a 或 KR1a0157。")
     parser.add_argument("--checkpoint-cursor", help="当前检索游标或批次标记。")
@@ -108,7 +108,7 @@ def _confirm(message: str, *, default: bool = True) -> bool:
 def _pick_project(outputs_root: Path) -> str:
     projects = list_projects(outputs_root)
     if not projects:
-        raise SystemExit("outputs/ 下没有项目。请先通过 Skill 创建项目并完成阶段二产物。")
+        raise SystemExit("outputs/ 下没有项目。请先通过 Skill 创建项目并完成阶段一产物。")
 
     print()
     print("可用项目:")
@@ -128,34 +128,44 @@ def _pick_project(outputs_root: Path) -> str:
         print(f"无效输入，可选值: {', '.join(valid_indexes.keys())}")
 
 
-def _resolve_project(outputs_root: Path, project_name: str) -> tuple[Path, Stage3Context]:
+def _resolve_project(outputs_root: Path, project_name: str) -> tuple[Path, Stage2Context]:
     project_dir = outputs_root / project_name
     if not project_dir.exists():
         raise SystemExit(f"项目不存在: {project_dir}")
 
-    stage3_context = load_stage3_context(project_dir)
-    if stage3_context is None:
-        raise SystemExit(f"缺少阶段二交接文件: {project_dir / '2b_scholarship_map.yaml'}")
-    if not stage3_context.target_themes:
-        raise SystemExit("stage3_handoff.target_themes 为空，无法启动阶段三。")
-    return project_dir, stage3_context
+    project_status = inspect_project(outputs_root, project_name)
+    stage1_snapshot = project_status.stages[0]
+    if not stage1_snapshot.is_complete:
+        missing = "、".join(stage1_snapshot.missing_required) or "1_journal_targeting.md、1_research_proposal.md"
+        raise SystemExit(f"阶段一尚未完成，缺少必选文件: {missing}")
+
+    stage2_context = load_stage2_context(project_dir)
+    if stage2_context is None:
+        raise SystemExit(f"缺少阶段一输入文件: {project_dir / '1_research_proposal.md'}")
+    if not stage2_context.target_themes:
+        raise SystemExit("阶段一尚未形成可用的研究问题或主题，无法启动阶段二。")
+    return project_dir, stage2_context
 
 
 def _resolved_env_file(raw_env_file: str | None) -> str:
     return raw_env_file or DEFAULT_ENV_FILE
 
 
-def _print_intro(project_dir: Path, stage3_context: Stage3Context, kanripo_root: Path) -> None:
+def _print_intro(project_dir: Path, stage2_context: Stage2Context, kanripo_root: Path) -> None:
     print()
-    print("阶段三将直接读取 stage2 handoff，不再提供交互清单。")
+    print("阶段二将直接读取阶段一文件，不再要求额外 handoff。")
     print("请先阅读 guide 或底层契约，确认本次要覆盖的 Kanripo 范围后，再输入 analysis_targets。")
-    print(f"guide: {STAGE3_GUIDE_PATH}")
+    print(f"guide: {STAGE2_GUIDE_PATH}")
     print(f"底层契约: {WORKSPACE_CONTRACT_PATH}")
     print(f"项目目录: {project_dir}")
     print(f"Kanripo 根目录: {kanripo_root}")
-    print(f"研究问题: {stage3_context.research_question or '(未填写)'}")
-    print("阶段二 handoff 主题:")
-    for item in stage3_context.target_themes:
+    print(f"研究问题: {stage2_context.research_question or '(未填写)'}")
+    print(
+        "阶段一检索主题:"
+        if stage2_context.retrieval_theme_source == "stage1_frontmatter"
+        else "阶段一提炼主题:"
+    )
+    for item in stage2_context.retrieval_themes:
         if item.description:
             print(f"  - {item.theme} | {item.description}")
         else:
@@ -204,7 +214,7 @@ def _prompt_analysis_targets(kanripo_root: Path, *, default_targets: list[str] |
 
         overview = measure_corpus_overview(kanripo_root, selection)
         _print_corpus_overview(overview)
-        if _confirm("确认以上调研范围无误，并开始阶段三研究吗？", default=True):
+        if _confirm("确认以上调研范围无误，并开始阶段二研究吗？", default=True):
             return list(selection.analysis_targets), overview.as_dict()
         default_value = " ".join(selection.analysis_targets)
 
@@ -214,11 +224,11 @@ def _session_snapshot_payload(project_dir: Path, session_data: dict[str, Any]) -
     return {
         "project_name": project_dir.name,
         "project_dir": str(project_dir),
-        "stage3_workspace_dir": str(stage3_workspace_dir(project_dir)),
+        "stage2_workspace_dir": str(stage2_workspace_dir(project_dir)),
         "analysis_targets": analysis_targets_from_session(session_data),
         "retrieval_progress": progress or {},
         "summary": summarize_retrieval_progress(progress),
-        "session_path": str(stage3_session_path(project_dir)),
+        "session_path": str(stage2_session_path(project_dir)),
     }
 
 
@@ -227,13 +237,13 @@ def _handle_checkpoint_command(args: argparse.Namespace, outputs_root: Path) -> 
         raise SystemExit("checkpoint 模式必须提供 --project。")
 
     project_dir, _ = _resolve_project(outputs_root, args.project)
-    ensure_stage3_workspace(project_dir)
+    ensure_stage2_workspace(project_dir)
 
     if args.show_checkpoint:
-        payload = _session_snapshot_payload(project_dir, load_stage3_session(project_dir))
+        payload = _session_snapshot_payload(project_dir, load_stage2_session(project_dir))
     else:
         try:
-            session_data = update_stage3_session_checkpoint(
+            session_data = update_stage2_session_checkpoint(
                 project_dir,
                 action=str(args.checkpoint_action),
                 target=args.checkpoint_target,
@@ -262,28 +272,32 @@ def _handle_checkpoint_command(args: argparse.Namespace, outputs_root: Path) -> 
 def _build_session_payload(
     *,
     project_dir: Path,
-    stage3_context: Any,
+    stage2_context: Stage2Context,
     kanripo_root: Path,
     analysis_targets: list[str],
     manifest_output_path: Path | None,
 ) -> dict[str, Any]:
     return {
-        "session_version": 3,
+        "session_version": 2,
         "status": "configured",
         "project_name": project_dir.name,
         "project_dir": str(project_dir),
-        "stage3_workspace_dir": str(stage3_workspace_dir(project_dir)),
+        "stage2_workspace_dir": str(stage2_workspace_dir(project_dir)),
         "manifest_path": str(manifest_output_path) if manifest_output_path else "",
-        "workspace_manifest_path": str(stage3_workspace_dir(project_dir) / "manifest.json"),
-        "scholarship_map_path": str(stage3_context.scholarship_map_path),
-        "proposal_path": str(stage3_context.proposal_path) if stage3_context.proposal_path else "",
-        "journal_path": str(stage3_context.journal_path) if stage3_context.journal_path else "",
-        "research_question": stage3_context.research_question,
-        "idea": stage3_context.research_question,
-        "theme_source": "stage2_handoff",
+        "workspace_manifest_path": str(stage2_workspace_dir(project_dir) / "manifest.json"),
+        "proposal_path": str(stage2_context.proposal_path),
+        "journal_path": str(stage2_context.journal_path) if stage2_context.journal_path else "",
+        "research_question": stage2_context.research_question,
+        "idea": stage2_context.idea,
+        "theme_source": "stage1_proposal",
+        "retrieval_theme_source": stage2_context.retrieval_theme_source,
+        "retrieval_themes": [
+            {"theme": item.theme, "description": item.description}
+            for item in stage2_context.retrieval_themes
+        ],
         "target_themes": [
             {"theme": item.theme, "description": item.description}
-            for item in stage3_context.target_themes
+            for item in stage2_context.target_themes
         ],
         "kanripo_root": str(kanripo_root),
         "analysis_targets": analysis_targets,
@@ -313,7 +327,7 @@ def _emit_summary(
         f" | 文本 {payload['corpus_overview']['text_file_count']}"
         f" | 目录 {payload['corpus_overview']['repo_dir_count']}"
     )
-    print(f"阶段三工作目录: {payload['stage3_workspace_dir']}")
+    print(f"阶段二工作目录: {payload['stage2_workspace_dir']}")
     if session_output_path:
         print(f"会话文件: {session_output_path}")
     if manifest_output_path:
@@ -332,13 +346,13 @@ def main() -> int:
         return _handle_checkpoint_command(args, outputs_root)
 
     project_name = args.project or _pick_project(outputs_root)
-    project_dir, stage3_context = _resolve_project(outputs_root, project_name)
-    ensure_stage3_workspace(project_dir)
+    project_dir, stage2_context = _resolve_project(outputs_root, project_name)
+    ensure_stage2_workspace(project_dir)
 
-    resumed_session = load_stage3_session(project_dir)
+    resumed_session = load_stage2_session(project_dir)
     if resumed_session:
         print()
-        print(f"检测到已有阶段三会话: {stage3_session_path(project_dir)}")
+        print(f"检测到已有阶段二会话: {stage2_session_path(project_dir)}")
         print(summarize_retrieval_progress(resumed_session.get("retrieval_progress")))
 
     kanripo_root = Path(args.kanripo_root).expanduser().resolve()
@@ -346,7 +360,7 @@ def main() -> int:
         raise SystemExit(f"Kanripo 根目录不存在: {kanripo_root}")
 
     if not args.json:
-        _print_intro(project_dir, stage3_context, kanripo_root)
+        _print_intro(project_dir, stage2_context, kanripo_root)
 
     if args.targets:
         selection = resolve_analysis_targets(kanripo_root, raw_input=args.targets)
@@ -356,35 +370,36 @@ def main() -> int:
             details = "; ".join(f"{item.token}: {item.detail}" for item in selection.issues)
             raise SystemExit(f"调研范围无效: {details}")
         analysis_targets = list(selection.analysis_targets)
-        corpus_overview = measure_corpus_overview(kanripo_root, selection).as_dict()
+        overview = measure_corpus_overview(kanripo_root, selection)
+        corpus_overview = overview.as_dict()
         if not args.json:
-            _print_corpus_overview(measure_corpus_overview(kanripo_root, selection))
+            _print_corpus_overview(overview)
     else:
         analysis_targets, corpus_overview = _prompt_analysis_targets(
             kanripo_root,
             default_targets=analysis_targets_from_session(resumed_session),
         )
 
-    manifest = build_stage3_manifest(
+    manifest = build_stage2_manifest(
         workspace_root=Path.cwd(),
         outputs_root=outputs_root,
         project_name=project_name,
         kanripo_root=kanripo_root,
         analysis_targets=analysis_targets,
         corpus_overview=corpus_overview,
-        stage3_context=stage3_context,
+        stage2_context=stage2_context,
         dotenv_path=_resolved_env_file(args.env_file),
     )
 
     manifest_output_path: Path | None = None
     session_output_path: Path | None = None
     if not args.no_write:
-        manifest_output_path = write_stage3_manifest(project_dir, manifest)
-        session_output_path = save_stage3_session(
+        manifest_output_path = write_stage2_manifest(project_dir, manifest)
+        session_output_path = save_stage2_session(
             project_dir,
             _build_session_payload(
                 project_dir=project_dir,
-                stage3_context=stage3_context,
+                stage2_context=stage2_context,
                 kanripo_root=kanripo_root,
                 analysis_targets=analysis_targets,
                 manifest_output_path=manifest_output_path,

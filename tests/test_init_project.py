@@ -33,7 +33,7 @@ _MODULE = _load_init_project_module()
 
 
 class InitProjectTests(unittest.TestCase):
-    def test_init_project_creates_stage2a_papers_dir(self) -> None:
+    def test_init_project_creates_stage2_and_stage3b_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             outputs = Path(tmpdir) / "outputs"
             argv = [
@@ -51,10 +51,12 @@ class InitProjectTests(unittest.TestCase):
 
             project = outputs / "demo"
             progress_exists = (project / "project_progress.yaml").exists()
-            papers_dir_exists = (project / "_stage2a" / "papers").is_dir()
+            stage2_dir_exists = (project / "_stage2").is_dir()
+            papers_dir_exists = (project / "_stage3b" / "papers").is_dir()
 
         self.assertEqual(exit_code, 0)
         self.assertTrue(progress_exists)
+        self.assertTrue(stage2_dir_exists)
         self.assertTrue(papers_dir_exists)
 
 

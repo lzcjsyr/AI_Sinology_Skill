@@ -47,13 +47,16 @@ Skill 在每次推进阶段后都应同步更新这个文件。
 - 建议同时包含：
   - `target_journal`
   - `settled_research_direction`
+  - `stage2_retrieval_themes`
 - 如果用户起初没有说明投稿目标，Skill 应先追问；如果目标期刊不在内置单刊 reference 内，Skill 应优先要求用户提供期刊网页并据此提炼要求，只有网页拿不到时才补问期刊级别、文章样式、篇幅与体例等信息。
+- `stage2_retrieval_themes` 推荐写成 YAML 列表，给出 2 到 5 个可直接供阶段二执行的检索主题。
 
 ### 阶段二
 
 - 文件：`2_primary_corpus.yaml`
+- 启动阶段二前，应先确认 `1_journal_targeting.md` 与 `1_research_proposal.md` 两个阶段一正式文件都已生成。
 - 阶段二只负责原始文献勘查与一手灵感积累，不与二手学术史混写。
-- 阶段二默认直接读取阶段一文件，不等待后置 scholarship map。
+- 阶段二默认直接读取阶段一文件，优先读取 `stage2_retrieval_themes`，没有时才回退到研究方向与 idea 的兜底推断；不等待后置 scholarship map。
 - 由 Skill 外部运行时生成；Skill 只约束写回契约。
 - 推荐同时提供：`2_stage2_manifest.json`
 - 推荐同时保留：`outputs/<project>/_stage2/session.json` 与 `outputs/<project>/_stage2/manifest.json`
@@ -84,16 +87,17 @@ records:
 - `3A` 文件：`3a_deepened_thinking.md`
 - `3B` 过程目录：`outputs/<project>/_stage3b/`
 - `3C` 文件：`3c_scholarship_map.yaml`
-- `3B` 推荐包含：
+- 阶段三要被判定为完成，至少还必须具备：
+  - `outputs/<project>/_stage3b/candidate_papers.md`
+  - `outputs/<project>/_stage3b/papers/`，且目录内至少有 1 份人工导入的论文、题录导出或笔记
+- `3B` 推荐额外保留：
   - `openalex-*.json`
   - `baidu-scholar-*.json`
-  - `candidate_papers.md`
   - `screening-notes.md`
-  - `papers/`
 - 上述 `_stage3b/` 文件都属于过程产物，不替代正式阶段文件。
 - `3A` 应先基于阶段一与阶段二原始文献，提炼出更深的问题意识、暂定判断和后续验证重点。
 - `3B` 负责二手研究的检索扩展与候选集收敛。
-- `3C` 负责生成结构化 scholarship map。
+- `3C` 必须读取 `3A` 的思考结果、`candidate_papers.md`，以及 `papers/` 中人工导入的论文/题录/笔记，再生成结构化 scholarship map。
 
 `3c_scholarship_map.yaml` 的最小结构：
 

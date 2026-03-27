@@ -49,6 +49,7 @@
 - 建议同时写入：
   - `target_journal`
   - `settled_research_direction`
+  - `stage2_retrieval_themes`
 - 正文建议包含：
   - 研究背景
   - 核心问题
@@ -56,6 +57,21 @@
   - 方法与章节预想
   - 给阶段二原始文献勘查与阶段三衔接提示
 - 阶段一的最终结论必须能被外部读者直接读出：当前达成一致的研究方向是什么、准备投稿给哪本期刊。
+- `stage2_retrieval_themes` 应给出 2 到 5 个可直接供阶段二执行的检索主题，优先写成 YAML 列表，而不是只把检索提示埋在正文段落里。
+
+推荐 front matter 例子：
+
+```yaml
+---
+idea: 明代祈雨
+target_journal: 中国语文
+settled_research_direction: 明代祈雨与国家礼制
+stage2_retrieval_themes:
+  - 明代祈雨礼制
+  - 祈雨奏疏与诏令
+  - 中央与地方祈雨文书
+---
+```
 
 ## `1_journal_targeting.md` 建议结构
 
@@ -92,6 +108,7 @@
 - 第三部分说明本文将主要依赖的材料类型、时段、文本群或人物群。
 - 第四部分写出预备分论点和章节逻辑，而不是只列大纲标题。
 - 第五部分把阶段二原始文献勘查与阶段三入口条件写清楚，便于后续 `3A`、`3B`、`3C` 接续。
+- 若已在 front matter 写入 `stage2_retrieval_themes`，正文中仍应解释这些主题为什么值得检索、分别对应哪条学术问题链。
 
 ## 质量检查
 
@@ -100,5 +117,6 @@
 - `1_research_proposal.md` 能让读者直接看出经过讨论后确定的研究方向与投稿期刊。
 - front matter 可被机器直接读取。
 - front matter 与正文不互相矛盾。
+- `stage2_retrieval_themes` 不是空泛关键词，而是阶段二可以直接据此展开原始文献勘查的检索主题。
 - 读完 proposal 后，审稿人能说清“本文准备解决什么问题、为何值得做、将用什么材料推进”。
 - 学术史部分不是文献清单，而是能看出本文与前人的差别。

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from runtime.stage3.baidu_scholar_smoke_test import build_result, build_url, resolve_api_key
+from runtime.stage2.baidu_scholar_smoke_test import build_result, build_url, resolve_api_key
 
 
 class BaiduScholarSmokeTestTests(unittest.TestCase):

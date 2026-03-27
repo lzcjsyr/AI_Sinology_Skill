@@ -3,50 +3,87 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from runtime.stage3.catalog import measure_corpus_overview, resolve_analysis_targets, split_target_tokens
-from runtime.stage3.session import (
+from runtime.stage2.catalog import measure_corpus_overview, resolve_analysis_targets, split_target_tokens
+from runtime.stage2.session import (
     ThemeItem,
-    build_stage3_manifest,
-    load_stage3_context,
-    load_stage3_session,
+    build_stage2_manifest,
+    load_stage2_context,
+    load_stage2_session,
     reconcile_retrieval_progress,
-    save_stage3_session,
-    stage3_session_path,
-    stage3_workspace_manifest_path,
+    save_stage2_session,
+    stage2_session_path,
+    stage2_workspace_manifest_path,
     update_retrieval_progress,
-    update_stage3_session_checkpoint,
-    write_stage3_manifest,
+    update_stage2_session_checkpoint,
+    write_stage2_manifest,
 )
 
 
-class Stage3SessionTests(unittest.TestCase):
-    def test_load_stage3_context_reads_stage2_handoff(self) -> None:
+class Stage2SessionTests(unittest.TestCase):
+    def test_load_stage2_context_reads_stage1_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir)
-            (project_dir / "2b_scholarship_map.yaml").write_text(
-                'research_question: "明代祈雨与国家礼制"\n'
-                "stage3_handoff:\n"
-                "  target_themes:\n"
-                '    - theme: "祈雨"\n'
-                '      description: "礼制中的祈雨实践"\n'
-                '    - theme: "灾异"\n',
+            (project_dir / "1_research_proposal.md").write_text(
+                "---\nidea: 明代祈雨\nsettled_research_direction: 明代祈雨与国家礼制\n---\n正文\n",
                 encoding="utf-8",
             )
-            (project_dir / "1_research_proposal.md").write_text("正文\n", encoding="utf-8")
-            (project_dir / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
+            (project_dir / "1_journal_targeting.md").write_text(
+                "---\nidea: 明代祈雨\nsettled_research_direction: 明代祈雨与国家礼制\n---\n目标期刊：《中国语文》\n",
+                encoding="utf-8",
+            )
 
-            context = load_stage3_context(project_dir)
+            context = load_stage2_context(project_dir)
 
         assert context is not None
         self.assertEqual(context.research_question, "明代祈雨与国家礼制")
+        self.assertEqual(context.retrieval_theme_source, "stage1_inference")
         self.assertEqual(
             list(context.target_themes),
             [
-                ThemeItem(theme="祈雨", description="礼制中的祈雨实践"),
-                ThemeItem(theme="灾异", description=""),
+                ThemeItem(theme="明代祈雨与国家礼制", description="基于阶段一初步想法与研究方向提炼的初始主题。"),
+                ThemeItem(theme="明代祈雨", description="基于阶段一初步想法与研究方向提炼的初始主题。"),
             ],
         )
+        self.assertEqual(context.retrieval_themes, context.target_themes)
+
+    def test_load_stage2_context_prefers_explicit_stage2_retrieval_themes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            (project_dir / "1_research_proposal.md").write_text(
+                "---\n"
+                "idea: 明代祈雨\n"
+                "settled_research_direction: 明代祈雨与国家礼制\n"
+                "stage2_retrieval_themes:\n"
+                "  - 明代祈雨礼制\n"
+                "  - 中央与地方祈雨文书\n"
+                "---\n"
+                "正文\n",
+                encoding="utf-8",
+            )
+            (project_dir / "1_journal_targeting.md").write_text(
+                "---\n"
+                "retrieval_themes:\n"
+                "  - 国家礼制与期刊问题意识\n"
+                "---\n"
+                "目标期刊：《中国语文》\n",
+                encoding="utf-8",
+            )
+
+            context = load_stage2_context(project_dir)
+
+        assert context is not None
+        self.assertEqual(context.retrieval_theme_source, "stage1_frontmatter")
+        self.assertEqual(
+            list(context.retrieval_themes),
+            [
+                ThemeItem(theme="明代祈雨礼制", description="阶段一明确给出的阶段二检索主题。"),
+                ThemeItem(theme="中央与地方祈雨文书", description="阶段一明确给出的阶段二检索主题。"),
+                ThemeItem(theme="国家礼制与期刊问题意识", description="阶段一明确给出的阶段二检索主题。"),
+            ],
+        )
+        self.assertEqual(context.retrieval_themes, context.target_themes)
 
     def test_split_target_tokens_accepts_commas_and_spaces(self) -> None:
         self.assertEqual(
@@ -99,22 +136,20 @@ class Stage3SessionTests(unittest.TestCase):
         self.assertEqual(overview.text_char_count, 16)
         self.assertEqual(overview.targets[0].text_char_count, 16)
 
-    def test_build_stage3_manifest_keeps_project_and_analysis_targets(self) -> None:
+    def test_build_stage2_manifest_keeps_project_and_analysis_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace_root = Path(tmpdir)
             outputs_root = workspace_root / "outputs"
             project_dir = outputs_root / "demo"
             project_dir.mkdir(parents=True)
-            (project_dir / "2b_scholarship_map.yaml").write_text(
-                'research_question: "明代祈雨与国家礼制"\n'
-                "stage3_handoff:\n"
-                "  target_themes:\n"
-                '    - theme: "祈雨"\n',
+            (project_dir / "1_research_proposal.md").write_text(
+                "---\nidea: 明代祈雨\nsettled_research_direction: 明代祈雨与国家礼制\n---\n正文\n",
                 encoding="utf-8",
             )
-            stage3_context = load_stage3_context(project_dir)
+            (project_dir / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
+            stage2_context = load_stage2_context(project_dir)
 
-            manifest = build_stage3_manifest(
+            manifest = build_stage2_manifest(
                 workspace_root=workspace_root,
                 outputs_root=outputs_root,
                 project_name="demo",
@@ -126,27 +161,62 @@ class Stage3SessionTests(unittest.TestCase):
                     "text_char_count": 12345,
                     "targets": [],
                 },
-                stage3_context=stage3_context,
+                stage2_context=stage2_context,
                 env_values={},
             )
 
-        assert stage3_context is not None
+        assert stage2_context is not None
         self.assertEqual(manifest["project_name"], "demo")
-        self.assertEqual(manifest["theme_source"], "stage2_handoff")
-        self.assertEqual(manifest["target_themes"][0]["theme"], "祈雨")
+        self.assertEqual(manifest["theme_source"], "stage1_proposal")
+        self.assertEqual(manifest["retrieval_theme_source"], "stage1_inference")
+        self.assertEqual(manifest["retrieval_themes"][0]["theme"], "明代祈雨与国家礼制")
+        self.assertEqual(manifest["target_themes"][0]["theme"], "明代祈雨与国家礼制")
         self.assertEqual(manifest["research_question"], "明代祈雨与国家礼制")
         self.assertEqual(manifest["analysis_targets"], ["KR1a", "KR3j0160"])
         self.assertEqual(manifest["corpus_overview"]["text_char_count"], 12345)
         self.assertEqual(len(manifest["model_slots"]), 3)
-        self.assertTrue(manifest["stage3_session_path"].endswith("/_stage3/session.json"))
-        self.assertTrue(manifest["stage3_workspace_manifest_path"].endswith("/_stage3/manifest.json"))
+        self.assertTrue(manifest["stage2_session_path"].endswith("/_stage2/session.json"))
+        self.assertTrue(manifest["stage2_workspace_manifest_path"].endswith("/_stage2/manifest.json"))
 
-    def test_stage3_workspace_persists_session_and_manifest_mirror(self) -> None:
+    def test_build_stage2_manifest_does_not_leak_process_env_when_env_values_are_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace_root = Path(tmpdir)
+            outputs_root = workspace_root / "outputs"
+            project_dir = outputs_root / "demo"
+            project_dir.mkdir(parents=True)
+            (project_dir / "1_research_proposal.md").write_text(
+                "---\nidea: 明代祈雨\nsettled_research_direction: 明代祈雨与国家礼制\n---\n正文\n",
+                encoding="utf-8",
+            )
+            (project_dir / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
+            stage2_context = load_stage2_context(project_dir)
+
+            with patch.dict("os.environ", {"VOLCENGINE_API_KEY": "from-os"}, clear=False):
+                manifest = build_stage2_manifest(
+                    workspace_root=workspace_root,
+                    outputs_root=outputs_root,
+                    project_name="demo",
+                    kanripo_root=workspace_root / "data" / "kanripo_repos",
+                    analysis_targets=["KR1a"],
+                    corpus_overview={
+                        "repo_dir_count": 1,
+                        "text_file_count": 1,
+                        "text_char_count": 100,
+                        "targets": [],
+                    },
+                    stage2_context=stage2_context,
+                    env_values={},
+                )
+
+        assert stage2_context is not None
+        self.assertTrue(all(not slot["has_api_key"] for slot in manifest["model_slots"]))
+
+    def test_stage2_workspace_persists_session_and_manifest_mirror(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "demo"
             project_dir.mkdir()
 
-            save_stage3_session(
+            save_stage2_session(
                 project_dir,
                 {
                     "status": "configured",
@@ -154,18 +224,18 @@ class Stage3SessionTests(unittest.TestCase):
                     "analysis_targets": ["KR3j0160"],
                 },
             )
-            root_manifest = write_stage3_manifest(
+            root_manifest = write_stage2_manifest(
                 project_dir,
                 {
                     "project_name": "demo",
                     "analysis_targets": ["KR3j0160"],
                 },
             )
-            loaded_session = load_stage3_session(project_dir)
+            loaded_session = load_stage2_session(project_dir)
 
             self.assertTrue(root_manifest.exists())
-            self.assertTrue(stage3_workspace_manifest_path(project_dir).exists())
-            self.assertTrue(stage3_session_path(project_dir).exists())
+            self.assertTrue(stage2_workspace_manifest_path(project_dir).exists())
+            self.assertTrue(stage2_session_path(project_dir).exists())
             self.assertEqual(loaded_session["status"], "configured")
             self.assertEqual(loaded_session["analysis_targets"], ["KR3j0160"])
             self.assertEqual(loaded_session["retrieval_progress"]["pending_targets"], ["KR3j0160"])
@@ -222,12 +292,12 @@ class Stage3SessionTests(unittest.TestCase):
         self.assertEqual(progress["completed_targets"], ["KR3j"])
         self.assertEqual(progress["pending_targets"], ["KR3j0160"])
 
-    def test_update_stage3_session_checkpoint_persists_resume_state(self) -> None:
+    def test_update_stage2_session_checkpoint_persists_resume_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "demo"
             project_dir.mkdir()
 
-            save_stage3_session(
+            save_stage2_session(
                 project_dir,
                 {
                     "status": "configured",
@@ -236,8 +306,8 @@ class Stage3SessionTests(unittest.TestCase):
                 },
             )
 
-            update_stage3_session_checkpoint(project_dir, action="start", target="KR3j0160")
-            update_stage3_session_checkpoint(
+            update_stage2_session_checkpoint(project_dir, action="start", target="KR3j0160")
+            update_stage2_session_checkpoint(
                 project_dir,
                 action="checkpoint",
                 cursor="offset=120",
@@ -246,7 +316,7 @@ class Stage3SessionTests(unittest.TestCase):
                 note="已检索到第 120 条",
             )
 
-            loaded_session = load_stage3_session(project_dir)
+            loaded_session = load_stage2_session(project_dir)
 
         self.assertEqual(loaded_session["analysis_targets"], ["KR3j", "KR3j0160"])
         self.assertEqual(loaded_session["retrieval_progress"]["current_target"], "KR3j0160")

@@ -1,4 +1,4 @@
-"""检查 Stage3 外部运行时依赖、Kanripo 数据目录和 API 配置是否就绪。"""
+"""检查阶段二外部运行时依赖、Kanripo 数据目录和 API 配置是否就绪。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 
-from .api_config import STAGE3_MODELS, merged_env, slot_payload
+from .api_config import STAGE2_MODELS, merged_env, slot_payload
 from .catalog import list_available_scope_dirs, list_available_scope_options
 
 
@@ -16,7 +16,7 @@ def module_available(module_name: str) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="检查外部阶段三运行时的前置条件。")
+    parser = argparse.ArgumentParser(description="检查外部阶段二运行时的前置条件。")
     parser.add_argument("--kanripo-root", required=True, help="外部 kanripo_repos 根目录。")
     parser.add_argument("--env-file", help="可选 .env 文件路径。默认读取当前目录下的 .env。")
     parser.add_argument("--json", action="store_true", help="输出 JSON。")
@@ -31,7 +31,7 @@ def main() -> int:
 
     slots = {
         slot: slot_payload(slot, env_values=env_values)
-        for slot in sorted(STAGE3_MODELS.keys())
+        for slot in sorted(STAGE2_MODELS.keys())
     }
     checks = {
         "kanripo_root": str(kanripo_root),
@@ -54,7 +54,7 @@ def main() -> int:
             for slot, payload in slots.items()
         },
     }
-    checks["ready_for_stage3"] = (
+    checks["ready_for_stage2"] = (
         checks["has_kanripo_root"]
         and checks["has_kanripo_catalog"]
         and checks["has_litellm"]
@@ -75,8 +75,8 @@ def main() -> int:
                 f"{slot}: {payload['provider']} / {payload['model']} / "
                 f"{'已配置 key' if payload['has_api_key'] else '缺少 key'}"
             )
-        print(f"阶段三可直接运行: {'是' if checks['ready_for_stage3'] else '否'}")
-    return 0 if checks["ready_for_stage3"] else 1
+        print(f"阶段二可直接运行: {'是' if checks['ready_for_stage2'] else '否'}")
+    return 0 if checks["ready_for_stage2"] else 1
 
 
 if __name__ == "__main__":

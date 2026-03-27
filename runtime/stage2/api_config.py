@@ -1,4 +1,4 @@
-"""Stage3 外部运行时的模型槽位、API 环境变量和请求参数组装。"""
+"""阶段二外部运行时的模型槽位、API 环境变量和请求参数组装。"""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ PROVIDER_API_KEYS_ENV_NAMES: dict[str, str] = {
 
 
 @dataclass(frozen=True)
-class Stage3ModelConfig:
+class Stage2ModelConfig:
     slot: str
     provider: str
     model: str
@@ -39,22 +39,22 @@ class Stage3ModelConfig:
     tpm: int
 
 
-STAGE3_MODELS: dict[str, Stage3ModelConfig] = {
-    "llm1": Stage3ModelConfig(
+STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
+    "llm1": Stage2ModelConfig(
         slot="llm1",
         provider="volcengine",
         model="deepseek-v3-2-251201",
         rpm=15000,
         tpm=1500000,
     ),
-    "llm2": Stage3ModelConfig(
+    "llm2": Stage2ModelConfig(
         slot="llm2",
         provider="volcengine",
         model="deepseek-v3-2-251201",
         rpm=15000,
         tpm=1500000,
     ),
-    "llm3": Stage3ModelConfig(
+    "llm3": Stage2ModelConfig(
         slot="llm3",
         provider="volcengine",
         model="doubao-seed-2-0-pro-260215",
@@ -63,7 +63,7 @@ STAGE3_MODELS: dict[str, Stage3ModelConfig] = {
     ),
 }
 
-STAGE3_RUNTIME_DEFAULTS: dict[str, Any] = {
+STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
     "screening_batch_max_chars": 300,
     "fragment_max_attempts": 3,
     "max_empty_retries": 2,
@@ -115,7 +115,7 @@ def resolve_provider_keys(
     dotenv_path: str | Path | None = None,
     env_values: dict[str, str] | None = None,
 ) -> tuple[str, tuple[str, ...]]:
-    env = env_values or merged_env(dotenv_path)
+    env = env_values if env_values is not None else merged_env(dotenv_path)
     env_name = PROVIDER_API_KEY_ENV_NAMES.get(provider, "")
     pool_env_name = PROVIDER_API_KEYS_ENV_NAMES.get(provider, "")
     single = env.get(env_name, "").strip()
@@ -132,7 +132,7 @@ def slot_payload(
     dotenv_path: str | Path | None = None,
     env_values: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    config = STAGE3_MODELS[slot]
+    config = STAGE2_MODELS[slot]
     api_key, api_keys = resolve_provider_keys(
         config.provider,
         dotenv_path=dotenv_path,

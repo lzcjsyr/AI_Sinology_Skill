@@ -4,10 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from runtime.stage3.catalog import list_available_scope_dirs, list_available_scope_options
+from runtime.stage2.catalog import list_available_scope_dirs, list_available_scope_options
 
 
-class Stage3ScopeCatalogTests(unittest.TestCase):
+class Stage2ScopeCatalogTests(unittest.TestCase):
     def test_list_scope_options_reads_catalog_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

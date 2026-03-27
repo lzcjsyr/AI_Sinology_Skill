@@ -9,17 +9,17 @@ import argparse
 from datetime import datetime
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Tuple, Union
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from stage2_common import dump_json, ensure_stage3b_dir, merged_env, now_iso, slugify
+from stage3_common import dump_json, ensure_stage3b_dir, merged_env, now_iso, slugify
 
 
 OPENALEX_ENDPOINT = "https://api.openalex.org/works"
 BAIDU_SCHOLAR_ENDPOINT = "https://qianfan.baidubce.com/v2/tools/baidu_scholar/search"
 DEFAULT_TIMEOUT = 30
-OpenAlexFetcher = Callable[..., tuple[dict[str, str | int], list[dict[str, Any]]]]
+OpenAlexFetcher = Callable[..., Tuple[Dict[str, Union[str, int]], List[Dict[str, Any]]]]
 OPENALEX_ID_BATCH_SIZE = 100
 
 
@@ -383,7 +383,7 @@ def fetch_baidu_scholar_records(
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "User-Agent": "ai-sinology-stage2/1.0",
+            "User-Agent": "ai-sinology-stage3b/1.0",
         },
     )
     return params, [normalize_baidu_scholar_work(item) for item in raw.get("data", [])]
@@ -644,7 +644,7 @@ def main() -> int:
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     dump_json(output_path, payload)
-    print(f"已写入阶段 2A 来源结果: {output_path}")
+    print(f"已写入阶段 3B 来源结果: {output_path}")
     print(f"记录数: {payload.get('record_count', 0)}")
     if args.provider == "openalex-expand":
         print(f"扩展模式: {payload.get('expand_mode', 'references')}")

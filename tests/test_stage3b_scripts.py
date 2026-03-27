@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from importlib.util import module_from_spec, spec_from_file_location
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -29,11 +28,10 @@ def _load_script_module(filename: str, module_name: str):
     return module
 
 
-_STAGE2_SOURCES = _load_script_module("stage2a_sources.py", "test_ai_sinology_stage2a_sources")
-_STAGE2_MAP = _load_script_module("stage2b_scholarship_map.py", "test_ai_sinology_stage2b_scholarship_map")
+_STAGE3_SOURCES = _load_script_module("stage3b_sources.py", "test_ai_sinology_stage3b_sources")
 
 
-class Stage2ScriptsTests(unittest.TestCase):
+class Stage3BScriptsTests(unittest.TestCase):
     def test_normalize_openalex_work_extracts_abstract_and_authors(self) -> None:
         work = {
             "id": "https://openalex.org/W123",
@@ -50,7 +48,7 @@ class Stage2ScriptsTests(unittest.TestCase):
             "cited_by_count": 8,
         }
 
-        payload = _STAGE2_SOURCES.normalize_openalex_work(work)
+        payload = _STAGE3_SOURCES.normalize_openalex_work(work)
 
         self.assertEqual(payload["doi"], "10.1234/demo")
         self.assertEqual(payload["authors"], ["Li Ming"])
@@ -70,44 +68,13 @@ class Stage2ScriptsTests(unittest.TestCase):
             "url": "https://xueshu.baidu.com/demo",
         }
 
-        payload = _STAGE2_SOURCES.normalize_baidu_scholar_work(work)
+        payload = _STAGE3_SOURCES.normalize_baidu_scholar_work(work)
 
         self.assertEqual(payload["source"], "baidu-scholar")
         self.assertEqual(payload["baidu_scholar_id"], "paper-123")
         self.assertEqual(payload["journal"], "中国社会科学")
         self.assertEqual(payload["keywords"], ["灾异说", "儒家经典", "董仲舒"])
         self.assertEqual(payload["landing_page_url"], "https://xueshu.baidu.com/demo")
-
-    def test_render_yaml_includes_core_works_and_source_files(self) -> None:
-        records = [
-            {
-                "source": "openalex",
-                "doi": "10.1234/demo",
-                "title": "Ritual and Rain",
-                "year": 2024,
-                "type": "article",
-                "authors": ["Li Ming"],
-                "journal": "Journal of Ritual Studies",
-                "abstract": "Discusses how rain rituals were interpreted in Han texts.",
-                "cited_by_count": 8,
-            }
-        ]
-
-        payload = _STAGE2_MAP.render_yaml(
-            research_question="汉代灾异与祈雨如何进入经学解释框架？",
-            target_journals=["中国语文"],
-            keywords=["ritual", "rain"],
-            source_files=["openalex-demo.json"],
-            records=records,
-            period_hint="近十年为主，可回溯经典文献",
-        )
-
-        self.assertIn('research_question: "汉代灾异与祈雨如何进入经学解释框架？"', payload)
-        self.assertIn('work: "Ritual and Rain"', payload)
-        self.assertIn('source: "openalex"', payload)
-        self.assertIn('    - "openalex-demo.json"', payload)
-        self.assertIn("stage3_handoff:", payload)
-        self.assertIn('    - theme: "ritual"', payload)
 
     def test_expand_openalex_citations_fetches_one_hop_and_dedupes(self) -> None:
         def fake_fetcher(
@@ -168,7 +135,7 @@ class Stage2ScriptsTests(unittest.TestCase):
             }
             return {"filter": filter_expr, "per-page": per_page, "page": page}, records_by_parent[parent_id]
 
-        payload = _STAGE2_SOURCES.expand_openalex_citations(
+        payload = _STAGE3_SOURCES.expand_openalex_citations(
             query="汉代 灾异 诠释",
             seed_ids=["W123", "https://openalex.org/W456"],
             per_page=10,
@@ -260,7 +227,7 @@ class Stage2ScriptsTests(unittest.TestCase):
             }
             return {"filter": filter_expr, "per-page": per_page, "page": page}, [records[item] for item in ids]
 
-        payload = _STAGE2_SOURCES.expand_openalex_references(
+        payload = _STAGE3_SOURCES.expand_openalex_references(
             query="汉代 灾异 诠释",
             seed_ids=["W123", "https://openalex.org/W456"],
             per_page=10,
@@ -278,44 +245,6 @@ class Stage2ScriptsTests(unittest.TestCase):
         self.assertEqual(by_id["W901"]["parent_ids"], ["W123", "W456"])
         self.assertEqual(by_id["W901"]["discovered_via"], "referenced_works")
         self.assertEqual(len(payload["fetches"]), 2)
-
-    def test_build_map_cli_writes_project_output(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            outputs = root / "outputs"
-            project = outputs / "demo"
-            project.mkdir(parents=True)
-            (project / "1_research_proposal.md").write_text("汉代灾异与祈雨如何进入经学解释框架？\n", encoding="utf-8")
-            (project / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
-            source_json = project / "_stage2a" / "openalex-demo.json"
-            source_json.parent.mkdir(parents=True)
-            source_json.write_text(
-                '{"records":[{"source":"openalex","title":"Ritual and Rain","year":2024,"type":"article","authors":["Li Ming"],"abstract":"Discusses Han texts.","cited_by_count":8}]}',
-                encoding="utf-8",
-            )
-
-            argv = [
-                "stage2b_scholarship_map.py",
-                "--project",
-                "demo",
-                "--outputs",
-                str(outputs),
-                "--source-json",
-                str(source_json),
-            ]
-            previous = sys.argv
-            try:
-                sys.argv = argv
-                exit_code = _STAGE2_MAP.main()
-            finally:
-                sys.argv = previous
-
-            payload = (project / "2b_scholarship_map.yaml").read_text(encoding="utf-8")
-
-        self.assertEqual(exit_code, 0)
-        self.assertIn('target_journals:', payload)
-        self.assertIn('"中国语文"', payload)
-
 
 if __name__ == "__main__":
     unittest.main()
