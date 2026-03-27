@@ -12,6 +12,7 @@ from .catalog import (
     measure_corpus_overview,
     resolve_analysis_targets,
     split_target_tokens,
+    text_files_for_repo_dir,
 )
 from .runner import Stage2RunnerError, run_stage2_pipeline
 from .session import (
@@ -73,6 +74,7 @@ __all__ = [
     "stage2_workspace_dir",
     "stage2_workspace_manifest_path",
     "summarize_retrieval_progress",
+    "text_files_for_repo_dir",
     "run_stage2_pipeline",
     "update_retrieval_progress",
     "update_stage2_session_checkpoint",

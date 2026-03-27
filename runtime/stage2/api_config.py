@@ -65,13 +65,9 @@ STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
 
 STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
     "screening_batch_max_chars": 300,
-    "fragment_max_attempts": 3,
-    "max_empty_retries": 2,
     "sync_headroom": 0.85,
     "request_latency_seconds": 12.0,
     "request_token_overhead": 64,
-    "sync_max_ahead": 128,
-    "sync_mode": "lowest_shared",
 }
 
 

@@ -9,41 +9,33 @@ from pathlib import Path
 from typing import Any
 
 from .api_config import STAGE2_MODELS, merged_env, slot_payload
-from .catalog import list_available_scope_dirs, list_available_scope_options
-
-
-def module_available(module_name: str) -> bool:
-    return importlib.util.find_spec(module_name) is not None
+from .catalog import catalog_root, list_available_scope_dirs, list_available_scope_options
+from .session import slot_summaries
 
 
 def static_checks(kanripo_root: str | Path, *, env_file: str | Path | None = None) -> dict[str, Any]:
     resolved_root = Path(kanripo_root).expanduser().resolve()
-    catalog = resolved_root / "KR-Catalog" / "KR"
-    env_values = merged_env(env_file or ".env")
-
-    slots = {
-        slot: slot_payload(slot, env_values=env_values)
-        for slot in sorted(STAGE2_MODELS.keys())
-    }
+    catalog = catalog_root(resolved_root)
+    slots = slot_summaries(dotenv_path=env_file or ".env")
     checks = {
         "kanripo_root": str(resolved_root),
         "has_kanripo_root": resolved_root.is_dir(),
         "has_kanripo_catalog": catalog.is_dir(),
         "scope_family_count": len(list_available_scope_options(resolved_root)) if resolved_root.exists() else 0,
         "scope_dir_count": len(list_available_scope_dirs(resolved_root)) if resolved_root.exists() else 0,
-        "has_litellm": module_available("litellm"),
+        "has_litellm": importlib.util.find_spec("litellm") is not None,
         "slots": {
-            slot: {
+            payload["slot"]: {
                 "provider": payload["provider"],
                 "model": payload["model"],
                 "base_url": payload["base_url"],
                 "api_key_env": payload["api_key_env"],
                 "api_keys_env": payload["api_keys_env"],
-                "has_api_key": bool(payload["api_key"]) or bool(payload["api_keys"]),
+                "has_api_key": payload["has_api_key"],
                 "rpm": payload["rpm"],
                 "tpm": payload["tpm"],
             }
-            for slot, payload in slots.items()
+            for payload in slots
         },
     }
     checks["ready_for_stage2"] = (

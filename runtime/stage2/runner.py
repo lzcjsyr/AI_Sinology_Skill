@@ -14,7 +14,13 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .api_config import screening_batch_char_limit, slot_payload
-from .catalog import PAGE_MARKER_PATTERN, AnalysisTargetSelection, ResolvedAnalysisTarget, resolve_analysis_targets
+from .catalog import (
+    PAGE_MARKER_PATTERN,
+    AnalysisTargetSelection,
+    ResolvedAnalysisTarget,
+    resolve_analysis_targets,
+    text_files_for_repo_dir,
+)
 from .io_utils import append_jsonl, read_json, read_jsonl, write_json, write_jsonl, write_yaml
 from .rate_control import RateControllerRegistry, SlotRateController, estimate_request_tokens
 from .session import (
@@ -128,13 +134,6 @@ def _normalize_title(raw_title: str) -> str:
     if "/" in text:
         text = text.split("/", 1)[0].strip()
     return text or "（未命名文献）"
-
-
-def _text_files_for_repo_dir(kanripo_root: Path, repo_dir: str) -> list[Path]:
-    repo_path = kanripo_root / repo_dir
-    if not repo_path.exists():
-        return []
-    return sorted(path for path in repo_path.iterdir() if path.is_file() and path.suffix == ".txt")
 
 
 def _split_file_to_fragments(file_path: Path, repo_dir: str) -> list[Fragment]:
@@ -698,7 +697,7 @@ def _load_or_build_fragments(
 
     fragments: list[Fragment] = []
     for repo_dir in target.repo_dirs:
-        for text_file in _text_files_for_repo_dir(kanripo_root, repo_dir):
+        for text_file in text_files_for_repo_dir(kanripo_root, repo_dir):
             fragments.extend(_split_file_to_fragments(text_file, repo_dir))
             if max_fragments is not None and len(fragments) >= max_fragments:
                 fragments = fragments[:max_fragments]

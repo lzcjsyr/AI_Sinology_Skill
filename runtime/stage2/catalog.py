@@ -261,7 +261,7 @@ def resolve_analysis_targets(
     )
 
 
-def _text_files_for_repo_dir(kanripo_root: Path, repo_dir: str) -> list[Path]:
+def text_files_for_repo_dir(kanripo_root: Path, repo_dir: str) -> list[Path]:
     repo_path = kanripo_root / repo_dir
     if not repo_path.exists():
         return []
@@ -300,7 +300,7 @@ def measure_corpus_overview(
         target_char_count = 0
 
         for repo_dir in item.repo_dirs:
-            files = _text_files_for_repo_dir(root, repo_dir)
+            files = text_files_for_repo_dir(root, repo_dir)
             target_file_count += len(files)
             for file_path in files:
                 file_char_count = _count_text_chars_in_file(file_path)
