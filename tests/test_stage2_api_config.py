@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from runtime.stage2.api_config import resolve_provider_keys, slot_payload
+from runtime.stage2.api_config import resolve_provider_keys, slot_payload, slot_worker_limit
 
 
 class Stage2ApiConfigTests(unittest.TestCase):
@@ -38,6 +38,12 @@ class Stage2ApiConfigTests(unittest.TestCase):
 
         self.assertEqual(primary, "")
         self.assertEqual(pool, ())
+
+    def test_slot_payload_exposes_configured_max_concurrency(self) -> None:
+        payload = slot_payload("llm3", env_values={"VOLCENGINE_API_KEY": "test-key"})
+
+        self.assertEqual(payload["max_concurrency"], 2)
+        self.assertEqual(slot_worker_limit("llm1"), 4)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock
 from unittest.mock import patch
 
+from runtime.stage2.api_config import screening_batch_char_limit
 from runtime.stage2.cli import WORKSPACE_ROOT, _resolve_runtime_path, main
 from runtime.stage2.runner import Fragment, _build_batches, run_stage2_pipeline
 
@@ -85,19 +86,19 @@ class Stage2CliTests(unittest.TestCase):
         self.assertIn("阶段一尚未完成", str(ctx.exception))
         self.assertIn("1_journal_targeting.md", str(ctx.exception))
 
-    def test_build_batches_respects_300_char_limit(self) -> None:
+    def test_build_batches_respects_configured_char_limit(self) -> None:
         fragments = [
             Fragment(
                 piece_id="pb:1",
                 source_file="测试文献",
-                original_text="甲" * 180,
+                original_text="甲" * 280,
                 repo_dir="KR4c0001",
                 text_file="KR4c0001_000.txt",
             ),
             Fragment(
                 piece_id="pb:2",
                 source_file="测试文献",
-                original_text="乙" * 140,
+                original_text="乙" * max(1, screening_batch_char_limit() - 250),
                 repo_dir="KR4c0001",
                 text_file="KR4c0001_000.txt",
             ),
@@ -131,6 +132,9 @@ class Stage2CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("确认阶段二调研范围", result.stdout)
+        self.assertNotIn("--llm1-workers", result.stdout)
+        self.assertNotIn("--llm2-workers", result.stdout)
+        self.assertNotIn("--llm3-workers", result.stdout)
 
     def test_cli_setup_only_prevents_default_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -237,6 +241,7 @@ class Stage2CliTests(unittest.TestCase):
         self.assertEqual(payload["analysis_targets"], ["KR3j0160"])
         self.assertEqual(payload["corpus_overview"]["text_char_count"], 4)
         self.assertTrue(all(slot["has_api_key"] for slot in payload["model_slots"]))
+        self.assertEqual(payload["model_slots"][0]["max_concurrency"], 4)
 
     def test_cli_run_executes_dual_screening_and_arbitration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

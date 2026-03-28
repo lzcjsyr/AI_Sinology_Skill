@@ -37,22 +37,25 @@ class Stage2ModelConfig:
     model: str
     rpm: int
     tpm: int
+    max_concurrency: int
 
 
 STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
     "llm1": Stage2ModelConfig(
         slot="llm1",
         provider="volcengine",
-        model="deepseek-v3-2-251201",
-        rpm=15000,
-        tpm=1500000,
+        model="doubao-seed-2-0-lite-260215",
+        rpm=30000,
+        tpm=5000000,
+        max_concurrency=200,
     ),
     "llm2": Stage2ModelConfig(
         slot="llm2",
         provider="volcengine",
-        model="deepseek-v3-2-251201",
-        rpm=15000,
-        tpm=1500000,
+        model="doubao-seed-2-0-lite-260215",
+        rpm=30000,
+        tpm=5000000,
+        max_concurrency=200,
     ),
     "llm3": Stage2ModelConfig(
         slot="llm3",
@@ -60,11 +63,12 @@ STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
         model="doubao-seed-2-0-pro-260215",
         rpm=30000,
         tpm=5000000,
+        max_concurrency=200,
     ),
 }
 
 STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
-    "screening_batch_max_chars": 300,
+    "screening_batch_max_chars": 500,
     "sync_headroom": 0.85,
     "request_latency_seconds": 12.0,
     "request_token_overhead": 64,
@@ -73,6 +77,11 @@ STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
 
 def screening_batch_char_limit() -> int:
     return max(1, int(STAGE2_RUNTIME_DEFAULTS["screening_batch_max_chars"]))
+
+
+def slot_worker_limit(slot: str) -> int:
+    config = STAGE2_MODELS[slot]
+    return max(1, int(config.max_concurrency))
 
 
 def _parse_key_pool(value: str | None) -> tuple[str, ...]:
@@ -151,4 +160,5 @@ def slot_payload(
         "api_keys": api_keys,
         "rpm": config.rpm,
         "tpm": config.tpm,
+        "max_concurrency": slot_worker_limit(slot),
     }

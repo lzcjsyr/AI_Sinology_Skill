@@ -120,9 +120,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="执行模式下最多读取多少个分页 fragment；默认不限。",
     )
-    parser.add_argument("--llm1-workers", type=int, default=4, help="执行模式下 llm1 并发上限；实际并发会受 RPM/TPM 与 key 数量限制。")
-    parser.add_argument("--llm2-workers", type=int, default=4, help="执行模式下 llm2 并发上限；实际并发会受 RPM/TPM 与 key 数量限制。")
-    parser.add_argument("--llm3-workers", type=int, default=2, help="执行模式下 llm3 并发上限；实际并发会受 RPM/TPM 与 key 数量限制。")
     parser.add_argument("--force-rerun", action="store_true", help="忽略已缓存的 target 产物并重跑。")
     parser.add_argument(
         "--checkpoint-action",
@@ -600,9 +597,6 @@ def main() -> int:
             project_dir=project_dir,
             dotenv_path=_resolved_env_file(args.env_file),
             max_fragments=args.max_fragments,
-            llm1_workers=args.llm1_workers,
-            llm2_workers=args.llm2_workers,
-            llm3_workers=args.llm3_workers,
             force_rerun=args.force_rerun,
             progress_callback=_build_progress_printer(as_json=args.json),
         )

@@ -265,6 +265,7 @@ def slot_summaries(
                 "has_api_key": bool(payload["api_key"]) or bool(payload["api_keys"]),
                 "rpm": payload["rpm"],
                 "tpm": payload["tpm"],
+                "max_concurrency": payload["max_concurrency"],
             }
         )
     return payloads

@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .api_config import screening_batch_char_limit, slot_payload
+from .api_config import screening_batch_char_limit, slot_payload, slot_worker_limit
 from .catalog import (
     PAGE_MARKER_PATTERN,
     AnalysisTargetSelection,
@@ -1138,9 +1138,9 @@ def run_stage2_pipeline(
     project_dir: str | Path,
     dotenv_path: str | Path | None = None,
     max_fragments: int | None = None,
-    llm1_workers: int = 4,
-    llm2_workers: int = 4,
-    llm3_workers: int = 2,
+    llm1_workers: int | None = None,
+    llm2_workers: int | None = None,
+    llm3_workers: int | None = None,
     force_rerun: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
@@ -1162,6 +1162,9 @@ def run_stage2_pipeline(
         update_stage2_session_checkpoint(project_path, action="reset", note="force rerun")
         completed_targets_before_run = set()
     clients = _build_clients(dotenv_path=dotenv_path)
+    llm1_workers = max(1, int(llm1_workers if llm1_workers is not None else slot_worker_limit("llm1")))
+    llm2_workers = max(1, int(llm2_workers if llm2_workers is not None else slot_worker_limit("llm2")))
+    llm3_workers = max(1, int(llm3_workers if llm3_workers is not None else slot_worker_limit("llm3")))
     _update_session_status(project_path, status="running", note="阶段二执行中")
     _emit_progress(
         progress_callback,

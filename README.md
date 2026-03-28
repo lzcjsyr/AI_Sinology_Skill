@@ -87,7 +87,6 @@ python3 .agent/skills/ai-sinology/scripts/sync_progress.py demo
 python3 -m runtime.stage2.cli --project demo --kanripo-root /path/to/kanripo_repos
 python3 -m runtime.stage2.cli --project demo --targets KR3j0160,KR3j0161 --env-file .env
 python3 -m runtime.stage2.cli --project demo --targets KR4c --env-file .env
-python3 -m runtime.stage2.cli --project demo --targets KR4c --env-file .env --llm1-workers 4 --llm2-workers 4 --llm3-workers 2
 python3 -m runtime.stage2.cli --project demo --targets KR4c --env-file .env --setup-only
 python3 -m runtime.stage2.cli --project demo --show-checkpoint
 python3 -m runtime.stage2.cli --project demo --checkpoint-action start --checkpoint-target KR3j0160
