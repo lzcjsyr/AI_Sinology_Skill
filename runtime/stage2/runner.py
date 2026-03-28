@@ -1,4 +1,4 @@
-"""阶段二执行器：切片、双模型筛选、第三模型仲裁，并落盘中间产物。"""
+"""阶段二执行器：切片、批次粗筛、单主题精筛、第三模型仲裁，并落盘中间产物。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -42,8 +43,11 @@ TECH_COMMENT_PATTERN = re.compile(
 CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 FRAGMENT_FILE_NAME = "fragments.jsonl"
 BATCH_FILE_NAME = "batches.jsonl"
+LLM1_COARSE_FILE_NAME = "llm1_coarse_screening.jsonl"
+LLM2_COARSE_FILE_NAME = "llm2_coarse_screening.jsonl"
 LLM1_FILE_NAME = "llm1_screening.jsonl"
 LLM2_FILE_NAME = "llm2_screening.jsonl"
+CANDIDATE_PAIRS_FILE_NAME = "candidate_batch_theme_pairs.jsonl"
 CONSENSUS_FILE_NAME = "consensus_records.json"
 DISPUTES_FILE_NAME = "disputes.jsonl"
 ARBITRATION_FILE_NAME = "llm3_arbitration.jsonl"
@@ -51,7 +55,11 @@ FINAL_FILE_NAME = "final_records.jsonl"
 SUMMARY_FILE_NAME = "target_summary.json"
 TARGETS_DIR_NAME = "targets"
 FINAL_CORPUS_FILE_NAME = "2_primary_corpus.yaml"
+PIPELINE_STATE_VERSION = 2
 ProgressCallback = Callable[[dict[str, Any]], None]
+HTTP_429_MAX_RETRIES = 4
+HTTP_429_BACKOFF_SECONDS = 2.0
+HTTP_429_BACKOFF_CAP_SECONDS = 30.0
 
 
 class Stage2RunnerError(RuntimeError):
@@ -190,9 +198,7 @@ def _build_batches(fragments: list[Fragment]) -> list[Batch]:
         if not current:
             return
         batch_index = len(batches) + 1
-        batch_text_parts: list[str] = []
-        for fragment in current:
-            batch_text_parts.append(f"### {fragment.piece_id}\n{fragment.original_text}")
+        batch_text_parts = [fragment.original_text for fragment in current]
         batches.append(
             Batch(
                 batch_id=f"batch_{batch_index:06d}",
@@ -235,6 +241,10 @@ def _build_batches(fragments: list[Fragment]) -> list[Batch]:
 
     flush()
     return batches
+
+
+def _theme_names(target_themes: list[dict[str, str]]) -> list[str]:
+    return [str(item.get("theme") or "").strip() for item in target_themes if str(item.get("theme") or "").strip()]
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -304,48 +314,63 @@ class OpenAICompatClient:
         body = dict(payload)
         if not allow_response_format:
             body.pop("response_format", None)
-        reservation = (
-            self.rate_controller.acquire(estimated_tokens=estimated_tokens)
-            if self.rate_controller is not None
-            else None
-        )
-        api_key = reservation.api_key if reservation is not None else self.api_keys[0]
-        request = Request(
-            _build_chat_url(self.base_url),
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=180) as response:
-                response_payload = json.loads(response.read().decode("utf-8"))
-                if reservation is not None:
-                    usage = response_payload.get("usage") or {}
-                    self.rate_controller.finalize(
-                        reservation,
-                        actual_tokens=int(usage.get("total_tokens") or estimated_tokens),
+        attempt = 0
+        while True:
+            reservation = (
+                self.rate_controller.acquire(estimated_tokens=estimated_tokens)
+                if self.rate_controller is not None
+                else None
+            )
+            api_key = reservation.api_key if reservation is not None else self.api_keys[0]
+            request = Request(
+                _build_chat_url(self.base_url),
+                data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=180) as response:
+                    response_payload = json.loads(response.read().decode("utf-8"))
+                    if reservation is not None:
+                        usage = response_payload.get("usage") or {}
+                        self.rate_controller.finalize(
+                            reservation,
+                            actual_tokens=int(usage.get("total_tokens") or estimated_tokens),
+                        )
+                    return response_payload
+            except HTTPError as exc:
+                message = exc.read().decode("utf-8", errors="ignore")
+                if allow_response_format and exc.code in {400, 404, 422}:
+                    if reservation is not None:
+                        self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
+                    return self._request(
+                        payload=payload,
+                        estimated_tokens=estimated_tokens,
+                        allow_response_format=False,
                     )
-                return response_payload
-        except HTTPError as exc:
-            message = exc.read().decode("utf-8", errors="ignore")
-            if allow_response_format and exc.code in {400, 404, 422}:
                 if reservation is not None:
                     self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
-                return self._request(
-                    payload=payload,
-                    estimated_tokens=estimated_tokens,
-                    allow_response_format=False,
-                )
-            if reservation is not None:
-                self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
-            raise Stage2RunnerError(f"{self.slot} 请求失败: HTTP {exc.code} {message[:500]}") from exc
-        except URLError as exc:
-            if reservation is not None:
-                self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
-            raise Stage2RunnerError(f"{self.slot} 网络错误: {exc}") from exc
+                if exc.code == 429 and attempt < HTTP_429_MAX_RETRIES:
+                    attempt += 1
+                    time.sleep(self._retry_delay_seconds(exc, attempt=attempt))
+                    continue
+                raise Stage2RunnerError(f"{self.slot} 请求失败: HTTP {exc.code} {message[:500]}") from exc
+            except URLError as exc:
+                if reservation is not None:
+                    self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
+                raise Stage2RunnerError(f"{self.slot} 网络错误: {exc}") from exc
+
+    def _retry_delay_seconds(self, exc: HTTPError, *, attempt: int) -> float:
+        retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+        if retry_after is not None:
+            try:
+                return max(0.0, min(float(retry_after), HTTP_429_BACKOFF_CAP_SECONDS))
+            except (TypeError, ValueError):
+                pass
+        return min(HTTP_429_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)), HTTP_429_BACKOFF_CAP_SECONDS)
 
     def chat_json(
         self,
@@ -378,7 +403,7 @@ class OpenAICompatClient:
         return _extract_json_object(text), response.get("usage") or {}
 
 
-def _screening_messages(
+def _coarse_screening_messages(
     *,
     target_themes: list[dict[str, str]],
     batch: Batch,
@@ -394,14 +419,13 @@ def _screening_messages(
         {
             "role": "system",
             "content": (
-                "你是严谨的古籍筛读助手。"
+                "你是严谨的古籍批次级初筛助手。"
                 "你必须只返回一个合法 JSON 对象，不得输出任何额外文字。"
-                '格式必须是 {"results":[{"piece_id":"...","matches":[{"theme":"...","is_relevant":true,"reason":"..."}]}]}。'
-                "规则：1) 每个输入 piece_id 必须且只出现一次。"
-                "2) 每个 piece 的 matches 必须覆盖全部输入主题，theme 文本必须与输入完全一致。"
-                "3) is_relevant 为 true 表示该页正文对该主题存在直接证据、关键线索或高度相关的表达。"
-                "4) is_relevant 为 false 表示该页正文对该主题无足够直接关联。"
-                "5) reason 必须是简短中文理由。"
+                '格式必须是 {"themes":[{"theme":"...","is_relevant":true}]}。'
+                "规则：1) themes 必须覆盖全部输入主题，theme 文本必须与输入完全一致。"
+                "2) 这里是初筛，只判断这整段正文是否可能与某主题相关，相对宽松，宁滥勿缺。"
+                "3) 只要该批次中可能存在相关 fragment，就返回 true。"
+                "4) 不要输出理由，不要输出 piece_id。"
             ),
         },
         {
@@ -410,9 +434,46 @@ def _screening_messages(
                 "研究主题如下：\n"
                 f"{themes_block}\n\n"
                 f"文献来源：{batch.source_file}\n"
-                f"repo_dir：{batch.repo_dir}\n\n"
-                "请逐条判断以下原文分页：\n"
+                "请判断以下整段正文对各主题是否可能相关：\n"
                 f"{batch.batch_text}"
+            ),
+        },
+    ]
+
+
+def _targeted_screening_messages(
+    *,
+    theme: str,
+    batch: Batch,
+    fragment_map: dict[str, Fragment],
+) -> list[dict[str, str]]:
+    fragment_lines: list[str] = []
+    for piece_id in batch.piece_ids:
+        fragment = fragment_map.get(piece_id)
+        if fragment is None:
+            continue
+        fragment_lines.append(f"### {piece_id}\n{fragment.original_text}")
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是严谨的古籍单主题精筛助手。"
+                "你必须只返回一个合法 JSON 对象，不得输出任何额外文字。"
+                '格式必须是 {"results":[{"piece_id":"...","is_relevant":true,"reason":"..."}]}。'
+                "规则：1) results 必须覆盖全部输入 piece_id，每个 piece_id 必须且只出现一次。"
+                "2) 当前只判断一个主题，不要输出其他主题。"
+                "3) is_relevant 为 true 表示该 fragment 对当前主题存在直接证据、关键线索或高度相关表达。"
+                '4) is_relevant 为 false 时，reason 必须写 "NA"。'
+                "5) is_relevant 为 true 时，reason 必须是简短中文理由。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"当前主题：{theme}\n\n"
+                f"文献来源：{batch.source_file}\n"
+                "请逐条判断以下 fragment：\n"
+                f"{'\n\n'.join(fragment_lines)}"
             ),
         },
     ]
@@ -448,17 +509,46 @@ def _arbitration_messages(
     ]
 
 
-def _normalize_screening_payload(
+def _normalize_coarse_screening_payload(
+    payload: dict[str, Any],
+    *,
+    target_themes: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    raw_results = payload.get("themes")
+    if not isinstance(raw_results, list):
+        raise Stage2RunnerError("粗筛返回缺少 themes 列表。")
+
+    theme_names = _theme_names(target_themes)
+    match_map: dict[str, dict[str, Any]] = {}
+    for raw_item in raw_results:
+        if not isinstance(raw_item, dict):
+            continue
+        theme = str(raw_item.get("theme") or "").strip()
+        if theme not in theme_names or theme in match_map:
+            continue
+        match_map[theme] = {
+            "theme": theme,
+            "is_relevant": bool(raw_item.get("is_relevant")),
+        }
+    return [
+        match_map.get(theme)
+        or {
+            "theme": theme,
+            "is_relevant": False,
+        }
+        for theme in theme_names
+    ]
+
+
+def _normalize_targeted_screening_payload(
     payload: dict[str, Any],
     *,
     batch: Batch,
-    target_themes: list[dict[str, str]],
 ) -> list[dict[str, Any]]:
     raw_results = payload.get("results")
     if not isinstance(raw_results, list):
         raise Stage2RunnerError(f"{batch.batch_id} 返回缺少 results 列表。")
 
-    theme_names = [str(item.get("theme") or "").strip() for item in target_themes if str(item.get("theme") or "").strip()]
     expected_piece_ids = list(batch.piece_ids)
     expected_set = set(expected_piece_ids)
     seen_piece_ids: set[str] = set()
@@ -471,46 +561,24 @@ def _normalize_screening_payload(
         if piece_id not in expected_set or piece_id in seen_piece_ids:
             continue
         seen_piece_ids.add(piece_id)
-        match_map: dict[str, dict[str, Any]] = {}
-        for raw_match in raw_item.get("matches") or []:
-            if not isinstance(raw_match, dict):
-                continue
-            theme = str(raw_match.get("theme") or "").strip()
-            if theme not in theme_names or theme in match_map:
-                continue
-            match_map[theme] = {
-                "theme": theme,
-                "is_relevant": bool(raw_match.get("is_relevant")),
-                "reason": str(raw_match.get("reason") or "").strip() or ("相关" if raw_match.get("is_relevant") else "不相关"),
-            }
+        is_relevant = bool(raw_item.get("is_relevant"))
+        reason = str(raw_item.get("reason") or "").strip()
         normalized.append(
             {
                 "piece_id": piece_id,
-                "matches": [
-                    match_map.get(theme)
-                    or {
-                        "theme": theme,
-                        "is_relevant": False,
-                        "reason": "未给出判断",
-                    }
-                    for theme in theme_names
-                ],
+                "is_relevant": is_relevant,
+                "reason": reason if is_relevant else "NA",
             }
         )
 
-    missing_piece_ids = [piece_id for piece_id in expected_piece_ids if piece_id not in seen_piece_ids]
-    for piece_id in missing_piece_ids:
+    for piece_id in expected_piece_ids:
+        if piece_id in seen_piece_ids:
+            continue
         normalized.append(
             {
                 "piece_id": piece_id,
-                "matches": [
-                    {
-                        "theme": theme,
-                        "is_relevant": False,
-                        "reason": "模型漏答",
-                    }
-                    for theme in theme_names
-                ],
+                "is_relevant": False,
+                "reason": "NA",
             }
         )
 
@@ -518,19 +586,49 @@ def _normalize_screening_payload(
     return normalized
 
 
-def _screen_batch(
+def _screen_batch_coarse(
     *,
     client: OpenAICompatClient,
     slot: str,
     batch: Batch,
     target_themes: list[dict[str, str]],
 ) -> dict[str, Any]:
-    payload, usage = client.chat_json(messages=_screening_messages(target_themes=target_themes, batch=batch), max_tokens=5000)
-    results = _normalize_screening_payload(payload, batch=batch, target_themes=target_themes)
+    payload, usage = client.chat_json(
+        messages=_coarse_screening_messages(target_themes=target_themes, batch=batch),
+        max_tokens=400,
+    )
+    results = _normalize_coarse_screening_payload(payload, target_themes=target_themes)
     return {
         "slot": slot,
         "model": client.model,
         "batch_id": batch.batch_id,
+        "source_file": batch.source_file,
+        "repo_dir": batch.repo_dir,
+        "themes": results,
+        "usage": usage,
+        "generated_at": _now_iso(),
+    }
+
+
+def _screen_batch_targeted(
+    *,
+    client: OpenAICompatClient,
+    slot: str,
+    batch: Batch,
+    theme: str,
+    fragment_map: dict[str, Fragment],
+) -> dict[str, Any]:
+    payload, usage = client.chat_json(
+        messages=_targeted_screening_messages(theme=theme, batch=batch, fragment_map=fragment_map),
+        max_tokens=1200,
+    )
+    results = _normalize_targeted_screening_payload(payload, batch=batch)
+    return {
+        "slot": slot,
+        "model": client.model,
+        "batch_id": batch.batch_id,
+        "batch_theme_key": f"{batch.batch_id}::{theme}",
+        "matched_theme": theme,
         "source_file": batch.source_file,
         "repo_dir": batch.repo_dir,
         "piece_ids": list(batch.piece_ids),
@@ -592,8 +690,16 @@ def _batches_path(target_dir: Path) -> Path:
     return target_dir / BATCH_FILE_NAME
 
 
+def _coarse_output_path(target_dir: Path, slot: str) -> Path:
+    return target_dir / (LLM1_COARSE_FILE_NAME if slot == "llm1" else LLM2_COARSE_FILE_NAME)
+
+
 def _slot_output_path(target_dir: Path, slot: str) -> Path:
     return target_dir / (LLM1_FILE_NAME if slot == "llm1" else LLM2_FILE_NAME)
+
+
+def _candidate_pairs_path(target_dir: Path) -> Path:
+    return target_dir / CANDIDATE_PAIRS_FILE_NAME
 
 
 def _consensus_path(target_dir: Path) -> Path:
@@ -629,6 +735,7 @@ def _save_target_state(target_dir: Path, *, repo_dirs: tuple[str, ...], max_frag
     state = _load_target_state(target_dir)
     state.update(
         {
+            "pipeline_state_version": PIPELINE_STATE_VERSION,
             "repo_dirs": list(repo_dirs),
             "batch_max_chars": screening_batch_char_limit(),
             "max_fragments": max_fragments,
@@ -649,11 +756,18 @@ def _update_target_state(target_dir: Path, **fields: Any) -> None:
 
 def _summarize_target_state(state: dict[str, Any]) -> str:
     phase = str(state.get("phase") or "unknown")
-    if phase == "slot_screening":
+    if phase == "coarse_screening":
         return (
             f"phase={phase}"
             f" | llm1={int(state.get('llm1_completed_batches') or 0)}/{int(state.get('batch_count') or 0)}"
             f" | llm2={int(state.get('llm2_completed_batches') or 0)}/{int(state.get('batch_count') or 0)}"
+        )
+    if phase == "targeted_screening":
+        return (
+            f"phase={phase}"
+            f" | pairs={int(state.get('candidate_pair_count') or 0)}"
+            f" | llm1={int(state.get('llm1_completed_pairs') or 0)}/{int(state.get('candidate_pair_count') or 0)}"
+            f" | llm2={int(state.get('llm2_completed_pairs') or 0)}/{int(state.get('candidate_pair_count') or 0)}"
         )
     if phase == "arbitration":
         return (
@@ -667,7 +781,7 @@ def _summarize_target_state(state: dict[str, Any]) -> str:
             f" | final_pieces={int(state.get('final_piece_count') or 0)}"
         )
     details = []
-    for key in ("fragment_count", "batch_count", "dispute_count"):
+    for key in ("fragment_count", "batch_count", "candidate_pair_count", "dispute_count"):
         if key in state:
             details.append(f"{key}={state[key]}")
     return f"phase={phase}" + (f" | {' | '.join(details)}" if details else "")
@@ -739,6 +853,10 @@ def _write_disputes(target_dir: Path, disputes: list[dict[str, Any]]) -> Path:
     return write_jsonl(_disputes_path(target_dir), disputes)
 
 
+def _write_candidate_pairs(target_dir: Path, pairs: list[dict[str, Any]]) -> Path:
+    return write_jsonl(_candidate_pairs_path(target_dir), pairs)
+
+
 def _load_disputes(path: Path) -> list[dict[str, Any]]:
     return read_jsonl(path)
 
@@ -752,7 +870,7 @@ def _load_cached_rows_by_key(path: Path, key: str) -> dict[str, dict[str, Any]]:
     return cached
 
 
-def _run_slot_batches(
+def _run_coarse_batches(
     *,
     client: OpenAICompatClient,
     slot: str,
@@ -769,7 +887,7 @@ def _run_slot_batches(
     pending_batches = [batch for batch in batches if batch.batch_id not in cached]
     _update_target_state(
         target_dir,
-        phase="slot_screening",
+        phase="coarse_screening",
         batch_count=len(batches),
         **{f"{slot}_completed_batches": len(cached)},
     )
@@ -779,6 +897,7 @@ def _run_slot_batches(
             event="slot_resume",
             target=target_token,
             slot=slot,
+            stage="coarse",
             completed=len(cached),
             total=len(batches),
         )
@@ -790,13 +909,13 @@ def _run_slot_batches(
     effective_workers = client.effective_worker_limit(
         requested_workers=workers,
         estimated_tokens=max(
-            estimate_request_tokens(messages=_screening_messages(target_themes=target_themes, batch=batch), max_tokens=5000)
+            estimate_request_tokens(messages=_coarse_screening_messages(target_themes=target_themes, batch=batch), max_tokens=400)
             for batch in pending_batches
         ),
     )
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         pending = {
-            executor.submit(_screen_batch, client=client, slot=slot, batch=batch, target_themes=target_themes): batch
+            executor.submit(_screen_batch_coarse, client=client, slot=slot, batch=batch, target_themes=target_themes): batch
             for batch in pending_batches
         }
         while pending:
@@ -809,7 +928,7 @@ def _run_slot_batches(
                 finished_count += 1
                 _update_target_state(
                     target_dir,
-                    phase="slot_screening",
+                    phase="coarse_screening",
                     batch_count=len(batches),
                     **{f"{slot}_completed_batches": finished_count},
                 )
@@ -817,15 +936,16 @@ def _run_slot_batches(
                     project_dir,
                     action="checkpoint",
                     target=target_token,
-                    cursor=f"{slot}:batch={finished_count}/{len(batches)}",
+                    cursor=f"{slot}:coarse_batch={finished_count}/{len(batches)}",
                     piece_id=batch.piece_ids[-1] if batch.piece_ids else "",
-                    note=f"{slot} 已完成 {finished_count}/{len(batches)} 个批次",
+                    note=f"{slot} 粗筛已完成 {finished_count}/{len(batches)} 个批次",
                 )
                 _emit_progress(
                     progress_callback,
                     event="slot_progress",
                     target=target_token,
                     slot=slot,
+                    stage="coarse",
                     completed=finished_count,
                     total=len(batches),
                     batch_id=batch.batch_id,
@@ -834,32 +954,172 @@ def _run_slot_batches(
     return [cached[batch_map_key.batch_id] for batch_map_key in batches if batch_map_key.batch_id in cached]
 
 
-def _flatten_slot_rows(slot_rows: list[dict[str, Any]], fragment_map: dict[str, Fragment]) -> dict[tuple[str, str], dict[str, Any]]:
+def _build_candidate_pairs(
+    *,
+    batches: list[Batch],
+    target_themes: list[dict[str, str]],
+    llm1_rows: list[dict[str, Any]],
+    llm2_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    batch_map = {batch.batch_id: batch for batch in batches}
+    batch_order = {batch.batch_id: index for index, batch in enumerate(batches)}
+    theme_order = {theme: index for index, theme in enumerate(_theme_names(target_themes))}
+    positive_keys: set[tuple[str, str]] = set()
+
+    for rows in (llm1_rows, llm2_rows):
+        for row in rows:
+            batch_id = str(row.get("batch_id") or "").strip()
+            if batch_id not in batch_map:
+                continue
+            for item in row.get("themes") or []:
+                theme = str(item.get("theme") or "").strip()
+                if theme not in theme_order:
+                    continue
+                if bool(item.get("is_relevant")):
+                    positive_keys.add((batch_id, theme))
+
+    pairs = [
+        {
+            "batch_theme_key": f"{batch_id}::{theme}",
+            "batch_id": batch_id,
+            "matched_theme": theme,
+            "source_file": batch_map[batch_id].source_file,
+            "repo_dir": batch_map[batch_id].repo_dir,
+            "piece_ids": list(batch_map[batch_id].piece_ids),
+        }
+        for batch_id, theme in sorted(
+            positive_keys,
+            key=lambda item: (batch_order.get(item[0], 0), theme_order.get(item[1], 0), item[1]),
+        )
+    ]
+    return pairs
+
+
+def _run_targeted_pairs(
+    *,
+    client: OpenAICompatClient,
+    slot: str,
+    candidate_pairs: list[dict[str, Any]],
+    batches: list[Batch],
+    fragment_map: dict[str, Fragment],
+    output_path: Path,
+    workers: int,
+    project_dir: Path,
+    target_token: str,
+    progress_callback: ProgressCallback | None = None,
+) -> list[dict[str, Any]]:
+    target_dir = output_path.parent
+    cached = _load_cached_rows_by_key(output_path, "batch_theme_key")
+    pending_pairs = [pair for pair in candidate_pairs if pair["batch_theme_key"] not in cached]
+    _update_target_state(
+        target_dir,
+        phase="targeted_screening",
+        candidate_pair_count=len(candidate_pairs),
+        **{f"{slot}_completed_pairs": len(cached)},
+    )
+    if cached:
+        _emit_progress(
+            progress_callback,
+            event="slot_resume",
+            target=target_token,
+            slot=slot,
+            stage="targeted",
+            completed=len(cached),
+            total=len(candidate_pairs),
+        )
+    if not pending_pairs:
+        return [cached[pair["batch_theme_key"]] for pair in candidate_pairs if pair["batch_theme_key"] in cached]
+
+    batch_map = {batch.batch_id: batch for batch in batches}
+    finished_count = len(cached)
+    effective_workers = client.effective_worker_limit(
+        requested_workers=workers,
+        estimated_tokens=max(
+            estimate_request_tokens(
+                messages=_targeted_screening_messages(
+                    theme=str(pair["matched_theme"]),
+                    batch=batch_map[str(pair["batch_id"])],
+                    fragment_map=fragment_map,
+                ),
+                max_tokens=1200,
+            )
+            for pair in pending_pairs
+        ),
+    )
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        pending = {
+            executor.submit(
+                _screen_batch_targeted,
+                client=client,
+                slot=slot,
+                batch=batch_map[str(pair["batch_id"])],
+                theme=str(pair["matched_theme"]),
+                fragment_map=fragment_map,
+            ): pair
+            for pair in pending_pairs
+        }
+        while pending:
+            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                pair = pending.pop(future)
+                row = future.result()
+                append_jsonl(output_path, row)
+                cached[str(pair["batch_theme_key"])] = row
+                finished_count += 1
+                _update_target_state(
+                    target_dir,
+                    phase="targeted_screening",
+                    candidate_pair_count=len(candidate_pairs),
+                    **{f"{slot}_completed_pairs": finished_count},
+                )
+                update_stage2_session_checkpoint(
+                    project_dir,
+                    action="checkpoint",
+                    target=target_token,
+                    cursor=f"{slot}:targeted_pair={finished_count}/{len(candidate_pairs)}",
+                    piece_id=str((pair.get("piece_ids") or [""])[-1] or ""),
+                    note=f"{slot} 精筛已完成 {finished_count}/{len(candidate_pairs)} 个候选主题",
+                )
+                _emit_progress(
+                    progress_callback,
+                    event="slot_progress",
+                    target=target_token,
+                    slot=slot,
+                    stage="targeted",
+                    completed=finished_count,
+                    total=len(candidate_pairs),
+                    batch_id=str(pair["batch_id"]),
+                    theme=str(pair["matched_theme"]),
+                )
+
+    return [cached[str(pair["batch_theme_key"])] for pair in candidate_pairs if str(pair["batch_theme_key"]) in cached]
+
+
+def _flatten_targeted_rows(slot_rows: list[dict[str, Any]], fragment_map: dict[str, Fragment]) -> dict[tuple[str, str], dict[str, Any]]:
     flattened: dict[tuple[str, str], dict[str, Any]] = {}
     for row in slot_rows:
         batch_id = str(row.get("batch_id") or "")
         slot = str(row.get("slot") or "")
         model = str(row.get("model") or "")
+        theme = str(row.get("matched_theme") or "").strip()
+        if not theme:
+            continue
         for piece_result in row.get("results") or []:
             piece_id = str(piece_result.get("piece_id") or "").strip()
             fragment = fragment_map.get(piece_id)
             if fragment is None:
                 continue
-            for match in piece_result.get("matches") or []:
-                theme = str(match.get("theme") or "").strip()
-                if not theme:
-                    continue
-                flattened[(piece_id, theme)] = {
-                    "piece_id": piece_id,
-                    "source_file": fragment.source_file,
-                    "original_text": fragment.original_text,
-                    "matched_theme": theme,
-                    "is_relevant": bool(match.get("is_relevant")),
-                    "reason": str(match.get("reason") or "").strip(),
-                    "slot": slot,
-                    "model": model,
-                    "batch_id": batch_id,
-                }
+            flattened[(piece_id, theme)] = {
+                "piece_id": piece_id,
+                "source_file": fragment.source_file,
+                "original_text": fragment.original_text,
+                "matched_theme": theme,
+                "is_relevant": bool(piece_result.get("is_relevant")),
+                "reason": str(piece_result.get("reason") or "").strip(),
+                "slot": slot,
+                "model": model,
+                "batch_id": batch_id,
+            }
     return flattened
 
 
@@ -1093,6 +1353,8 @@ def _target_state_matches(target_dir: Path, *, repo_dirs: tuple[str, ...], max_f
     if not state:
         return False
     return (
+        int(state.get("pipeline_state_version") or 0) == PIPELINE_STATE_VERSION
+        and
         tuple(str(item) for item in state.get("repo_dirs") or []) == tuple(repo_dirs)
         and int(state.get("batch_max_chars") or 0) == screening_batch_char_limit()
         and state.get("max_fragments") == max_fragments
@@ -1260,22 +1522,65 @@ def run_stage2_pipeline(
                 batch_count=len(batches),
             )
 
-            llm1_rows = _run_slot_batches(
+            llm1_coarse_rows = _run_coarse_batches(
                 client=clients["llm1"],
                 slot="llm1",
                 batches=batches,
                 target_themes=target_themes,
+                output_path=_coarse_output_path(target_dir, "llm1"),
+                workers=llm1_workers,
+                project_dir=project_path,
+                target_token=target.token,
+                progress_callback=progress_callback,
+            )
+            llm2_coarse_rows = _run_coarse_batches(
+                client=clients["llm2"],
+                slot="llm2",
+                batches=batches,
+                target_themes=target_themes,
+                output_path=_coarse_output_path(target_dir, "llm2"),
+                workers=llm2_workers,
+                project_dir=project_path,
+                target_token=target.token,
+                progress_callback=progress_callback,
+            )
+            candidate_pairs = _build_candidate_pairs(
+                batches=batches,
+                target_themes=target_themes,
+                llm1_rows=llm1_coarse_rows,
+                llm2_rows=llm2_coarse_rows,
+            )
+            _write_candidate_pairs(target_dir, candidate_pairs)
+            _emit_progress(
+                progress_callback,
+                event="candidate_pairs_ready",
+                target=target.token,
+                candidate_pair_count=len(candidate_pairs),
+            )
+            _update_target_state(
+                target_dir,
+                phase="targeted_ready",
+                candidate_pair_count=len(candidate_pairs),
+            )
+
+            llm1_rows = _run_targeted_pairs(
+                client=clients["llm1"],
+                slot="llm1",
+                candidate_pairs=candidate_pairs,
+                batches=batches,
+                fragment_map=fragment_map,
                 output_path=_slot_output_path(target_dir, "llm1"),
                 workers=llm1_workers,
                 project_dir=project_path,
                 target_token=target.token,
                 progress_callback=progress_callback,
             )
-            llm2_rows = _run_slot_batches(
+            llm2_rows = _run_targeted_pairs(
                 client=clients["llm2"],
                 slot="llm2",
+                candidate_pairs=candidate_pairs,
                 batches=batches,
-                target_themes=target_themes,
+                fragment_map=fragment_map,
                 output_path=_slot_output_path(target_dir, "llm2"),
                 workers=llm2_workers,
                 project_dir=project_path,
@@ -1283,8 +1588,8 @@ def run_stage2_pipeline(
                 progress_callback=progress_callback,
             )
 
-            llm1_map = _flatten_slot_rows(llm1_rows, fragment_map)
-            llm2_map = _flatten_slot_rows(llm2_rows, fragment_map)
+            llm1_map = _flatten_targeted_rows(llm1_rows, fragment_map)
+            llm2_map = _flatten_targeted_rows(llm2_rows, fragment_map)
             consensus, disputes = _build_consensus_and_disputes(llm1_map=llm1_map, llm2_map=llm2_map)
             write_json(_consensus_path(target_dir), {"records": consensus})
             disputes_path = _write_disputes(target_dir, disputes)
@@ -1292,12 +1597,14 @@ def run_stage2_pipeline(
                 progress_callback,
                 event="consensus_ready",
                 target=target.token,
+                candidate_pair_count=len(candidate_pairs),
                 consensus_count=len(consensus),
                 dispute_count=len(disputes),
             )
             _update_target_state(
                 target_dir,
                 phase="disputes_ready",
+                candidate_pair_count=len(candidate_pairs),
                 consensus_count=len(consensus),
                 dispute_count=len(disputes),
             )
@@ -1324,6 +1631,7 @@ def run_stage2_pipeline(
                 "repo_dir_count": len(target.repo_dirs),
                 "fragment_count": len(fragments),
                 "batch_count": len(batches),
+                "candidate_pair_count": len(candidate_pairs),
                 "consensus_count": len(consensus),
                 "dispute_count": len(disputes),
                 "arbitrated_keep_count": sum(
@@ -1340,10 +1648,13 @@ def run_stage2_pipeline(
                 is_completed=True,
                 final_record_count=summary["final_record_count"],
                 final_piece_count=summary["final_piece_count"],
+                candidate_pair_count=summary["candidate_pair_count"],
                 consensus_count=summary["consensus_count"],
                 dispute_count=summary["dispute_count"],
-                llm1_completed_batches=len(llm1_rows),
-                llm2_completed_batches=len(llm2_rows),
+                llm1_completed_batches=len(llm1_coarse_rows),
+                llm2_completed_batches=len(llm2_coarse_rows),
+                llm1_completed_pairs=len(llm1_rows),
+                llm2_completed_pairs=len(llm2_rows),
                 llm3_completed_disputes=len(arbitration_rows),
             )
             summaries.append(summary)

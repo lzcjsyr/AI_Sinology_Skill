@@ -21,33 +21,49 @@ class Stage2CliTests(unittest.TestCase):
     def _fake_chat_json(self, *, messages, max_tokens=4000, temperature=0.0):  # noqa: ANN001
         system_text = messages[0]["content"]
         user_text = messages[1]["content"]
+        if "repo_dir" in user_text or "repo_dir：" in user_text:
+            raise AssertionError(user_text)
         if "第三方学术仲裁助手" in system_text:
             return {"is_relevant": False, "reason": "以免误收，判为不保留"}, {"total_tokens": 10}
 
-        piece_ids = re.findall(r"^###\s+(\S+)$", user_text, re.MULTILINE)
-        theme_names = [item.strip() for item in re.findall(r"^T\d+:\s+([^\n|]+)", user_text, re.MULTILINE)]
-        results = []
-        for piece_id in piece_ids:
-            matches = []
-            for theme in theme_names:
+        if "批次级初筛助手" in system_text:
+            theme_names = [item.strip() for item in re.findall(r"^T\d+:\s+([^\n|]+)", user_text, re.MULTILINE)]
+            return (
+                {
+                    "themes": [
+                        {
+                            "theme": theme,
+                            "is_relevant": "冬雷" in theme and "冬雷" in user_text,
+                        }
+                        for theme in theme_names
+                    ]
+                },
+                {"total_tokens": 12},
+            )
+
+        if "单主题精筛助手" in system_text:
+            piece_ids = re.findall(r"^###\s+(\S+)$", user_text, re.MULTILINE)
+            results = []
+            for piece_id in piece_ids:
                 if self.slot == "llm1":
                     is_relevant = piece_id.endswith("1a")
-                    reason = "出现冬雷题咏线索" if is_relevant else "仅一般叙写"
+                    reason = "出现冬雷题咏线索" if is_relevant else "NA"
                 elif self.slot == "llm2":
                     is_relevant = True
-                    reason = "可能关联冬雷主题"
+                    reason = "可能关联冬雷主题" if is_relevant else "NA"
                 else:
                     is_relevant = False
-                    reason = "不应进入最终语料"
-                matches.append(
+                    reason = "NA"
+                results.append(
                     {
-                        "theme": theme,
+                        "piece_id": piece_id,
                         "is_relevant": is_relevant,
                         "reason": reason,
                     }
                 )
-            results.append({"piece_id": piece_id, "matches": matches})
-        return {"results": results}, {"total_tokens": 20}
+            return {"results": results}, {"total_tokens": 20}
+
+        raise AssertionError(f"unexpected prompt: {system_text}")
 
     def test_cli_requires_both_stage1_files_before_stage2(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -135,6 +151,60 @@ class Stage2CliTests(unittest.TestCase):
         self.assertNotIn("--llm1-workers", result.stdout)
         self.assertNotIn("--llm2-workers", result.stdout)
         self.assertNotIn("--llm3-workers", result.stdout)
+
+    def test_coarse_screening_prompt_uses_plain_batch_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            outputs_root = root / "outputs"
+            project_dir = outputs_root / "demo"
+            project_dir.mkdir(parents=True)
+            (project_dir / "1_research_proposal.md").write_text(
+                "---\nidea: 冬雷诗题咏\nsettled_research_direction: 冬雷意象的诗学转化\nstage2_retrieval_themes:\n  - 唐宋冬雷题咏\n---\n正文\n",
+                encoding="utf-8",
+            )
+            (project_dir / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
+            (root / ".env").write_text("VOLCENGINE_API_KEY=test-key\n", encoding="utf-8")
+
+            kanripo_root = root / "kanripo_repos"
+            repo_dir = kanripo_root / "KR4c0001"
+            repo_dir.mkdir(parents=True)
+            (repo_dir / "KR4c0001_000.txt").write_text(
+                "#+TITLE: 测试唐诗\n<pb:KR4c0001_000-1a>\n冬雷忽作，诗人惊而有咏。\n<pb:KR4c0001_000-1b>\n春风池馆，闲写花光。\n",
+                encoding="utf-8",
+            )
+
+            seen_coarse_user_text: list[str] = []
+
+            def asserting_chat_json(self, *, messages, max_tokens=4000, temperature=0.0):  # noqa: ANN001
+                system_text = messages[0]["content"]
+                user_text = messages[1]["content"]
+                if "批次级初筛助手" in system_text:
+                    seen_coarse_user_text.append(user_text)
+                    if "###" in user_text or "piece_id" in user_text or "repo_dir" in user_text:
+                        raise AssertionError(user_text)
+                return Stage2CliTests._fake_chat_json(self, messages=messages, max_tokens=max_tokens, temperature=temperature)
+
+            with (
+                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=asserting_chat_json),
+                patch("runtime.stage2.cli.Path.cwd", return_value=root),
+                patch(
+                    "sys.argv",
+                    [
+                        "stage2-cli",
+                        "--outputs",
+                        str(outputs_root),
+                        "--project",
+                        "demo",
+                        "--kanripo-root",
+                        str(kanripo_root),
+                        "--targets",
+                        "KR4c0001",
+                    ],
+                ),
+            ):
+                self.assertEqual(main(), 0)
+
+        self.assertTrue(seen_coarse_user_text)
 
     def test_cli_setup_only_prevents_default_execution(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -304,6 +374,9 @@ class Stage2CliTests(unittest.TestCase):
             self.assertIn("KR4c0001_000-1a", final_corpus)
             self.assertNotIn("KR4c0001_000-1b", final_corpus)
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "fragments.jsonl").exists())
+            self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm1_coarse_screening.jsonl").exists())
+            self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm2_coarse_screening.jsonl").exists())
+            self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "candidate_batch_theme_pairs.jsonl").exists())
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm1_screening.jsonl").exists())
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm2_screening.jsonl").exists())
             disputes_text = (project_dir / "_stage2" / "targets" / "KR4c0001" / "disputes.jsonl").read_text(encoding="utf-8")
@@ -313,7 +386,9 @@ class Stage2CliTests(unittest.TestCase):
             self.assertIn('"status": "completed"', session_text)
             self.assertIn('"current_target": ""', session_text)
             self.assertIn("[stage2] 开始执行", stdout.getvalue())
-            self.assertIn("[stage2] KR4c0001 llm1 进度", stdout.getvalue())
+            self.assertIn("[stage2] KR4c0001 llm1 粗筛进度", stdout.getvalue())
+            self.assertIn("[stage2] KR4c0001 候选主题就绪", stdout.getvalue())
+            self.assertIn("[stage2] KR4c0001 llm1 精筛进度", stdout.getvalue())
             self.assertIn("[stage2] 完成目标 KR4c0001", stdout.getvalue())
             self.assertIn("阶段二执行完成", stdout.getvalue())
 

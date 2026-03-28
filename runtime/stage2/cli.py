@@ -425,6 +425,7 @@ def _emit_run_summary(summary: dict[str, Any], *, as_json: bool) -> None:
             f"  - {item['target']}"
             f" | fragments {item['fragment_count']}"
             f" | batches {item['batch_count']}"
+            f" | candidate_pairs {item.get('candidate_pair_count', 0)}"
             f" | consensus {item['consensus_count']}"
             f" | disputes {item['dispute_count']}"
             f" | final {item['final_record_count']}"
@@ -455,17 +456,31 @@ def _build_progress_printer(*, as_json: bool):
             line = f"[stage2] {event['target']} 切片完成 | fragments={event['fragment_count']}"
         elif event_name == "batches_ready":
             line = f"[stage2] {event['target']} 批次就绪 | batches={event['batch_count']}"
+        elif event_name == "candidate_pairs_ready":
+            line = f"[stage2] {event['target']} 候选主题就绪 | pairs={event['candidate_pair_count']}"
         elif event_name == "slot_resume":
-            line = f"[stage2] {event['target']} {event['slot']} 复用缓存 | {event['completed']}/{event['total']}"
+            stage = str(event.get("stage") or "targeted")
+            stage_label = "粗筛" if stage == "coarse" else "精筛"
+            line = f"[stage2] {event['target']} {event['slot']} {stage_label}复用缓存 | {event['completed']}/{event['total']}"
         elif event_name == "slot_progress":
-            line = (
-                f"[stage2] {event['target']} {event['slot']} 进度"
-                f" | {event['completed']}/{event['total']}"
-                f" | 当前批次={event['batch_id']}"
-            )
+            stage = str(event.get("stage") or "targeted")
+            if stage == "coarse":
+                line = (
+                    f"[stage2] {event['target']} {event['slot']} 粗筛进度"
+                    f" | {event['completed']}/{event['total']}"
+                    f" | 当前批次={event['batch_id']}"
+                )
+            else:
+                line = (
+                    f"[stage2] {event['target']} {event['slot']} 精筛进度"
+                    f" | {event['completed']}/{event['total']}"
+                    f" | 当前批次={event['batch_id']}"
+                    f" | 当前主题={event['theme']}"
+                )
         elif event_name == "consensus_ready":
             line = (
                 f"[stage2] {event['target']} 双模型比对完成"
+                f" | candidate_pairs={event.get('candidate_pair_count', 0)}"
                 f" | consensus={event['consensus_count']}"
                 f" | disputes={event['dispute_count']}"
             )
