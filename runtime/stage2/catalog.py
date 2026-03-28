@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import re
+
+from .api_config import screening_batch_char_limit
 
 
 CATALOG_SECTION_PATTERN = re.compile(r"^\*\s+KR[1-4]\s+(.+)$")
@@ -12,6 +15,10 @@ CATALOG_ENTRY_PATTERN = re.compile(r"^\*\*\s+\[\[file:(KR[1-4][a-z])\.txt\]\[([^
 FAMILY_TARGET_PATTERN = re.compile(r"^KR[1-4][a-z]$")
 REPO_TARGET_PATTERN = re.compile(r"^KR[1-4][a-z]\d{4}$")
 PAGE_MARKER_PATTERN = re.compile(r"<pb:[^>]+>")
+TECH_COMMENT_PATTERN = re.compile(
+    r"\bKR\d+[a-z]?\d*(?:_[A-Za-z0-9\-]+)*\b|_tls_|^pb:",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +79,8 @@ class TargetCorpusStat:
     repo_dir_count: int
     text_file_count: int
     text_char_count: int
+    fragment_count: int = 0
+    batch_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -80,12 +89,16 @@ class CorpusOverview:
     repo_dir_count: int
     text_file_count: int
     text_char_count: int
+    fragment_count: int = 0
+    batch_count: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
             "repo_dir_count": self.repo_dir_count,
             "text_file_count": self.text_file_count,
             "text_char_count": self.text_char_count,
+            "fragment_count": self.fragment_count,
+            "batch_count": self.batch_count,
             "targets": [
                 {
                     "token": item.token,
@@ -93,6 +106,8 @@ class CorpusOverview:
                     "repo_dir_count": item.repo_dir_count,
                     "text_file_count": item.text_file_count,
                     "text_char_count": item.text_char_count,
+                    "fragment_count": item.fragment_count,
+                    "batch_count": item.batch_count,
                 }
                 for item in self.targets
             ],
@@ -272,16 +287,69 @@ def text_files_for_repo_dir(kanripo_root: Path, repo_dir: str) -> list[Path]:
     )
 
 
-def _count_text_chars_in_file(path: Path) -> int:
-    total = 0
-    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+def _clean_fragment_text(text: str) -> str:
+    lines: list[str] = []
+    for raw_line in text.splitlines():
         stripped = raw_line.strip()
-        if not stripped or stripped.startswith("#"):
+        if raw_line.startswith("#+"):
             continue
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            payload = stripped.lstrip("#").strip()
+            if payload and TECH_COMMENT_PATTERN.search(payload):
+                continue
         content = PAGE_MARKER_PATTERN.sub("", stripped).replace("¶", "")
         content = "".join(content.split())
-        total += len(content)
-    return total
+        if content:
+            lines.append(content)
+    return "\n".join(lines).strip()
+
+
+def _estimate_batch_count_from_lengths(fragment_lengths: list[int]) -> int:
+    if not fragment_lengths:
+        return 0
+    limit = screening_batch_char_limit()
+    batches = 0
+    current_chars = 0
+    for fragment_chars in fragment_lengths:
+        safe_chars = max(1, int(fragment_chars))
+        if current_chars == 0:
+            batches += 1
+            current_chars = safe_chars
+            continue
+        if current_chars + safe_chars > limit:
+            batches += 1
+            current_chars = safe_chars
+            continue
+        current_chars += safe_chars
+    return batches
+
+
+def _measure_text_file(path: Path) -> tuple[int, int, int]:
+    raw_text = path.read_text(encoding="utf-8", errors="ignore")
+    matches = list(PAGE_MARKER_PATTERN.finditer(raw_text))
+    fragment_lengths: list[int] = []
+
+    if not matches:
+        cleaned = _clean_fragment_text(raw_text)
+        if not cleaned:
+            return 0, 0, 0
+        length = len(cleaned.replace("\n", ""))
+        return length, 1, 1
+
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_text)
+        cleaned = _clean_fragment_text(raw_text[start:end])
+        if not cleaned:
+            continue
+        fragment_lengths.append(len(cleaned.replace("\n", "")))
+
+    if not fragment_lengths:
+        return 0, 0, 0
+
+    return sum(fragment_lengths), len(fragment_lengths), _estimate_batch_count_from_lengths(fragment_lengths)
 
 
 def measure_corpus_overview(
@@ -293,19 +361,27 @@ def measure_corpus_overview(
     repo_dir_seen: set[str] = set()
     text_file_count = 0
     text_char_count = 0
+    fragment_count = 0
+    batch_count = 0
 
     for item in selection.resolved_targets:
         repo_dir_count = len(item.repo_dirs)
         target_file_count = 0
         target_char_count = 0
+        target_fragment_count = 0
+        target_batch_count = 0
 
         for repo_dir in item.repo_dirs:
             files = text_files_for_repo_dir(root, repo_dir)
             target_file_count += len(files)
             for file_path in files:
-                file_char_count = _count_text_chars_in_file(file_path)
+                file_char_count, file_fragment_count, file_batch_count = _measure_text_file(file_path)
                 target_char_count += file_char_count
                 text_char_count += file_char_count
+                target_fragment_count += file_fragment_count
+                fragment_count += file_fragment_count
+                target_batch_count += file_batch_count
+                batch_count += file_batch_count
             text_file_count += len(files)
             if repo_dir in repo_dir_seen:
                 continue
@@ -318,6 +394,12 @@ def measure_corpus_overview(
                 repo_dir_count=repo_dir_count,
                 text_file_count=target_file_count,
                 text_char_count=target_char_count,
+                fragment_count=target_fragment_count,
+                batch_count=target_batch_count or (
+                    max(target_file_count, math.ceil(target_char_count / screening_batch_char_limit()))
+                    if target_char_count or target_file_count
+                    else 0
+                ),
             )
         )
 
@@ -326,4 +408,10 @@ def measure_corpus_overview(
         repo_dir_count=len(repo_dir_seen),
         text_file_count=text_file_count,
         text_char_count=text_char_count,
+        fragment_count=fragment_count,
+        batch_count=batch_count or (
+            max(text_file_count, math.ceil(text_char_count / screening_batch_char_limit()))
+            if text_char_count or text_file_count
+            else 0
+        ),
     )

@@ -47,7 +47,7 @@ STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
         model="doubao-seed-2-0-lite-260215",
         rpm=30000,
         tpm=5000000,
-        max_concurrency=200,
+        max_concurrency=80,
     ),
     "llm2": Stage2ModelConfig(
         slot="llm2",
@@ -55,7 +55,7 @@ STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
         model="doubao-seed-2-0-lite-260215",
         rpm=30000,
         tpm=5000000,
-        max_concurrency=200,
+        max_concurrency=80,
     ),
     "llm3": Stage2ModelConfig(
         slot="llm3",
@@ -63,7 +63,7 @@ STAGE2_MODELS: dict[str, Stage2ModelConfig] = {
         model="doubao-seed-2-0-pro-260215",
         rpm=30000,
         tpm=5000000,
-        max_concurrency=200,
+        max_concurrency=80,
     ),
 }
 
@@ -72,6 +72,14 @@ STAGE2_RUNTIME_DEFAULTS: dict[str, Any] = {
     "sync_headroom": 0.85,
     "request_latency_seconds": 12.0,
     "request_token_overhead": 64,
+    "request_timeout_seconds": 120.0,
+    "network_error_max_retries": 3,
+    "stall_heartbeat_seconds": 30.0,
+}
+STAGE2_FALLBACK_DEFAULTS: dict[str, Any] = {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4.6",
+    "max_retries": 3,
 }
 
 
@@ -161,4 +169,42 @@ def slot_payload(
         "rpm": config.rpm,
         "tpm": config.tpm,
         "max_concurrency": slot_worker_limit(slot),
+    }
+
+
+def fallback_payload(
+    *,
+    dotenv_path: str | Path | None = None,
+    env_values: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    env = env_values if env_values is not None else merged_env(dotenv_path)
+    provider = str(env.get("STAGE2_FALLBACK_PROVIDER") or STAGE2_FALLBACK_DEFAULTS["provider"]).strip().lower()
+    model = str(env.get("STAGE2_FALLBACK_MODEL") or STAGE2_FALLBACK_DEFAULTS["model"]).strip()
+    base_url = str(env.get("STAGE2_FALLBACK_BASE_URL") or PROVIDER_DEFAULT_BASE_URLS.get(provider, "")).strip()
+    max_retries = max(
+        0,
+        int(env.get("STAGE2_FALLBACK_MAX_RETRIES") or STAGE2_FALLBACK_DEFAULTS["max_retries"]),
+    )
+
+    dedicated_keys = list(_parse_key_pool(env.get("STAGE2_FALLBACK_API_KEYS", "")))
+    dedicated_primary = str(env.get("STAGE2_FALLBACK_API_KEY") or "").strip()
+    if dedicated_primary and dedicated_primary not in dedicated_keys:
+        dedicated_keys.insert(0, dedicated_primary)
+
+    provider_primary = ""
+    provider_pool: tuple[str, ...] = ()
+    if provider:
+        provider_primary, provider_pool = resolve_provider_keys(provider, env_values=env)
+
+    api_keys = tuple(dedicated_keys) or provider_pool
+    api_key = api_keys[0] if api_keys else provider_primary
+    return {
+        "slot": "fallback",
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        "api_key": api_key,
+        "api_keys": api_keys,
+        "max_retries": max_retries,
+        "enabled": bool(provider and model and base_url and api_keys and max_retries > 0),
     }

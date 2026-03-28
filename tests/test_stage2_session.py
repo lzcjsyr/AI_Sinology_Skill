@@ -134,7 +134,11 @@ class Stage2SessionTests(unittest.TestCase):
         self.assertEqual(overview.repo_dir_count, 1)
         self.assertEqual(overview.text_file_count, 1)
         self.assertEqual(overview.text_char_count, 16)
+        self.assertEqual(overview.fragment_count, 2)
+        self.assertEqual(overview.batch_count, 1)
         self.assertEqual(overview.targets[0].text_char_count, 16)
+        self.assertEqual(overview.targets[0].fragment_count, 2)
+        self.assertEqual(overview.targets[0].batch_count, 1)
 
     def test_build_stage2_manifest_keeps_project_and_analysis_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -175,6 +179,8 @@ class Stage2SessionTests(unittest.TestCase):
         self.assertEqual(manifest["analysis_targets"], ["KR1a", "KR3j0160"])
         self.assertEqual(manifest["corpus_overview"]["text_char_count"], 12345)
         self.assertEqual(len(manifest["model_slots"]), 3)
+        self.assertEqual(manifest["timing_estimate"]["theme_count"], 2)
+        self.assertGreaterEqual(manifest["timing_estimate"]["upper_bound_seconds"], manifest["timing_estimate"]["lower_bound_seconds"])
         self.assertTrue(manifest["stage2_session_path"].endswith("/_stage2/session.json"))
         self.assertTrue(manifest["stage2_workspace_manifest_path"].endswith("/_stage2/2_stage2_manifest.json"))
 

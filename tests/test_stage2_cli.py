@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,8 +13,8 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 from runtime.stage2.api_config import screening_batch_char_limit
-from runtime.stage2.cli import WORKSPACE_ROOT, _resolve_runtime_path, main
-from runtime.stage2.runner import Fragment, _build_batches, run_stage2_pipeline
+from runtime.stage2.cli import WORKSPACE_ROOT, _emit_summary, _resolve_runtime_path, main
+from runtime.stage2.runner import Fragment, Stage2FormatError, _build_batches, run_stage2_pipeline
 
 
 class Stage2CliTests(unittest.TestCase):
@@ -64,6 +65,62 @@ class Stage2CliTests(unittest.TestCase):
             return {"results": results}, {"total_tokens": 20}
 
         raise AssertionError(f"unexpected prompt: {system_text}")
+
+    def _prepare_stage2_demo(self) -> tuple[Path, Path]:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        outputs_root = root / "outputs"
+        project_dir = outputs_root / "demo"
+        project_dir.mkdir(parents=True)
+        (project_dir / "1_research_proposal.md").write_text(
+            "---\nidea: 冬雷诗题咏\nsettled_research_direction: 冬雷意象的诗学转化\nstage2_retrieval_themes:\n  - 唐宋冬雷题咏\n---\n正文\n",
+            encoding="utf-8",
+        )
+        (project_dir / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
+        (root / ".env").write_text(
+            "\n".join(
+                [
+                    "VOLCENGINE_API_KEY=test-key",
+                    "STAGE2_FALLBACK_PROVIDER=openrouter",
+                    "STAGE2_FALLBACK_MODEL=anthropic/claude-sonnet-4.6",
+                    "STAGE2_FALLBACK_BASE_URL=https://openrouter.ai/api/v1/chat/completions",
+                    "STAGE2_FALLBACK_API_KEY=fallback-key",
+                    "STAGE2_FALLBACK_MAX_RETRIES=3",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        kanripo_root = root / "kanripo_repos"
+        repo_dir = kanripo_root / "KR4c0001"
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "KR4c0001_000.txt").write_text(
+            "#+TITLE: 测试唐诗\n<pb:KR4c0001_000-1a>\n冬雷忽作，诗人惊而有咏。\n",
+            encoding="utf-8",
+        )
+
+        with (
+            patch("runtime.stage2.cli.Path.cwd", return_value=root),
+            patch(
+                "sys.argv",
+                [
+                    "stage2-cli",
+                    "--outputs",
+                    str(outputs_root),
+                    "--project",
+                    "demo",
+                    "--kanripo-root",
+                    str(kanripo_root),
+                    "--targets",
+                    "KR4c0001",
+                    "--setup-only",
+                ],
+            ),
+        ):
+            self.assertEqual(main(), 0)
+
+        return root, project_dir
 
     def test_cli_requires_both_stage1_files_before_stage2(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -126,6 +183,41 @@ class Stage2CliTests(unittest.TestCase):
         self.assertEqual(list(batches[0].piece_ids), ["pb:1"])
         self.assertEqual(list(batches[1].piece_ids), ["pb:2"])
 
+    def test_emit_summary_formats_large_counts_and_timing_estimate(self) -> None:
+        manifest = {
+            "project_name": "demo",
+            "analysis_targets": ["KR1a"],
+            "corpus_overview": {
+                "text_char_count": 12117027,
+                "text_file_count": 1697,
+                "repo_dir_count": 112,
+            },
+            "timing_estimate": {
+                "theme_count": 3,
+                "fragment_count": 2400,
+                "batch_count": 1200,
+                "lower_bound_seconds": 240,
+                "upper_bound_seconds": 960,
+                "request_seconds": 20,
+            },
+            "stage2_workspace_dir": "/tmp/demo/_stage2",
+        }
+
+        stdout = io.StringIO()
+        with patch("sys.stdout", stdout):
+            _emit_summary(
+                manifest,
+                manifest_output_path=None,
+                session_output_path=None,
+                as_json=False,
+            )
+
+        rendered = stdout.getvalue()
+        self.assertIn("12,117,027", rendered)
+        self.assertIn("1,697", rendered)
+        self.assertIn("估时 | 主题 3 | 片段 2,400 | 批次 1,200", rendered)
+        self.assertIn("预估耗时 4 分 - 16 分", rendered)
+
     def test_cli_default_runtime_paths_resolve_from_workspace_root(self) -> None:
         self.assertEqual(
             _resolve_runtime_path("outputs", default_relative="outputs"),
@@ -148,9 +240,9 @@ class Stage2CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("确认阶段二调研范围", result.stdout)
-        self.assertNotIn("--llm1-workers", result.stdout)
-        self.assertNotIn("--llm2-workers", result.stdout)
-        self.assertNotIn("--llm3-workers", result.stdout)
+        self.assertIn("--llm1-workers", result.stdout)
+        self.assertIn("--llm2-workers", result.stdout)
+        self.assertIn("--llm3-workers", result.stdout)
 
     def test_coarse_screening_prompt_uses_plain_batch_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -310,8 +402,10 @@ class Stage2CliTests(unittest.TestCase):
         )
         self.assertEqual(payload["analysis_targets"], ["KR3j0160"])
         self.assertEqual(payload["corpus_overview"]["text_char_count"], 4)
+        self.assertIn("timing_estimate", payload)
+        self.assertEqual(payload["timing_estimate"]["theme_count"], 2)
         self.assertTrue(all(slot["has_api_key"] for slot in payload["model_slots"]))
-        self.assertEqual(payload["model_slots"][0]["max_concurrency"], 4)
+        self.assertEqual(payload["model_slots"][0]["max_concurrency"], 24)
 
     def test_cli_run_executes_dual_screening_and_arbitration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -514,6 +608,66 @@ class Stage2CliTests(unittest.TestCase):
             self.assertTrue(completed_state["is_completed"])
             self.assertEqual(summary["piece_count"], 1)
             self.assertIn("target_resumed", stdout.getvalue())
+
+    def test_run_stage2_pipeline_uses_fallback_model_after_primary_format_failure(self) -> None:
+        root, project_dir = self._prepare_stage2_demo()
+
+        def fallback_chat_json(self, *, messages, max_tokens=4000, temperature=0.0):  # noqa: ANN001
+            system_text = messages[0]["content"]
+            if self.slot == "llm1" and "批次级初筛助手" in system_text:
+                raise Stage2FormatError("模型输出不是合法 JSON: refusal")
+            return Stage2CliTests._fake_chat_json(self, messages=messages, max_tokens=max_tokens, temperature=temperature)
+
+        with patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=fallback_chat_json):
+            summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
+
+        coarse_rows = [
+            json.loads(line)
+            for line in (project_dir / "_stage2" / "targets" / "KR4c0001" / "llm1_coarse_screening.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(summary["piece_count"], 1)
+        self.assertEqual(len(coarse_rows), 1)
+        self.assertTrue(coarse_rows[0]["used_format_fallback"])
+        self.assertEqual(coarse_rows[0]["provider"], "openrouter")
+        self.assertEqual(coarse_rows[0]["model"], "anthropic/claude-sonnet-4.6")
+
+    def test_run_stage2_pipeline_records_manual_review_when_fallback_is_exhausted(self) -> None:
+        root, project_dir = self._prepare_stage2_demo()
+
+        def manual_review_chat_json(self, *, messages, max_tokens=4000, temperature=0.0):  # noqa: ANN001
+            system_text = messages[0]["content"]
+            if self.slot in {"llm1", "fallback"} and "单主题精筛助手" in system_text:
+                raise Stage2FormatError("模型输出不是合法 JSON: refusal")
+            return Stage2CliTests._fake_chat_json(self, messages=messages, max_tokens=max_tokens, temperature=temperature)
+
+        with patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=manual_review_chat_json):
+            summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
+
+        target_dir = project_dir / "_stage2" / "targets" / "KR4c0001"
+        manual_review_rows = [
+            json.loads(line)
+            for line in (target_dir / "manual_review_queue.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        manual_review_report = (target_dir / "MANUAL_REVIEW_REQUIRED.md").read_text(encoding="utf-8")
+        final_rows = [
+            json.loads(line)
+            for line in (target_dir / "final_records.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+        self.assertEqual(summary["piece_count"], 1)
+        self.assertEqual(summary["targets"][0]["manual_review_count"], 1)
+        self.assertEqual(len(manual_review_rows), 1)
+        self.assertEqual(manual_review_rows[0]["manual_review_stage"], "targeted")
+        self.assertEqual(manual_review_rows[0]["piece_id"], "KR4c0001_000-1a")
+        self.assertIn("KR4c0001_000-1a", manual_review_report)
+        self.assertIn("冬雷忽作，诗人惊而有咏。", manual_review_report)
+        self.assertTrue(final_rows[0]["needs_manual_review"])
+        self.assertIn("自动兜底失败", final_rows[0]["manual_review_reason"])
 
 
 if __name__ == "__main__":

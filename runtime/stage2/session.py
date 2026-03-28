@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import math
 from pathlib import Path
 from typing import Any
 
-from .api_config import STAGE2_MODELS, merged_env, slot_payload
+from .api_config import STAGE2_MODELS, merged_env, screening_batch_char_limit, slot_payload, slot_worker_limit
 from .catalog import normalize_scope
 
 
@@ -17,6 +18,7 @@ STAGE2_WORKSPACE_DIR = "_stage2"
 STAGE2_WORKSPACE_MANIFEST_FILE = STAGE2_MANIFEST_FILE
 STAGE2_SESSION_FILE = "session.json"
 RETRIEVAL_PROGRESS_VERSION = 1
+STAGE2_ESTIMATED_REQUEST_SECONDS = 20
 
 
 @dataclass(frozen=True)
@@ -271,6 +273,133 @@ def slot_summaries(
     return payloads
 
 
+def _stage2_worker_limit(model_slots: list[dict[str, Any]], slot: str) -> int:
+    for item in model_slots:
+        if str(item.get("slot") or "") == slot:
+            try:
+                return max(1, int(item.get("max_concurrency") or 0))
+            except (TypeError, ValueError):
+                break
+    return slot_worker_limit(slot)
+
+
+def _estimate_target_batch_count(item: dict[str, Any]) -> int:
+    explicit = _non_negative_int(item.get("batch_count"))
+    if explicit:
+        return explicit
+    text_file_count = _non_negative_int(item.get("text_file_count"))
+    text_char_count = _non_negative_int(item.get("text_char_count"))
+    if not text_file_count and not text_char_count:
+        return 0
+    return max(text_file_count, math.ceil(text_char_count / screening_batch_char_limit()))
+
+
+def _estimate_target_fragment_count(item: dict[str, Any]) -> int:
+    explicit = _non_negative_int(item.get("fragment_count"))
+    if explicit:
+        return explicit
+    return max(_non_negative_int(item.get("text_file_count")), _estimate_target_batch_count(item))
+
+
+def _phase_seconds(*, request_count: int, workers: int, request_seconds: int) -> int:
+    safe_request_count = max(0, int(request_count))
+    if safe_request_count == 0:
+        return 0
+    safe_workers = max(1, int(workers))
+    return math.ceil(safe_request_count / safe_workers) * max(1, int(request_seconds))
+
+
+def build_stage2_timing_estimate(
+    *,
+    corpus_overview: dict[str, Any],
+    theme_count: int,
+    model_slots: list[dict[str, Any]],
+    request_seconds: int = STAGE2_ESTIMATED_REQUEST_SECONDS,
+) -> dict[str, Any]:
+    safe_theme_count = max(0, int(theme_count))
+    llm1_workers = _stage2_worker_limit(model_slots, "llm1")
+    llm2_workers = _stage2_worker_limit(model_slots, "llm2")
+    llm3_workers = _stage2_worker_limit(model_slots, "llm3")
+
+    target_estimates: list[dict[str, Any]] = []
+    total_batch_count = 0
+    total_fragment_count = 0
+    total_max_candidate_pair_count = 0
+    total_max_dispute_count = 0
+    total_lower_bound_seconds = 0
+    total_upper_bound_seconds = 0
+
+    raw_targets = [item for item in corpus_overview.get("targets") or [] if isinstance(item, dict)]
+    if not raw_targets and (
+        _non_negative_int(corpus_overview.get("text_file_count"))
+        or _non_negative_int(corpus_overview.get("text_char_count"))
+        or _non_negative_int(corpus_overview.get("batch_count"))
+        or _non_negative_int(corpus_overview.get("fragment_count"))
+    ):
+        raw_targets = [dict(corpus_overview)]
+
+    for raw_target in raw_targets:
+        item = raw_target if isinstance(raw_target, dict) else {}
+        batch_count = _estimate_target_batch_count(item)
+        fragment_count = _estimate_target_fragment_count(item)
+        max_candidate_pair_count = batch_count * safe_theme_count
+        max_dispute_count = fragment_count * safe_theme_count
+        lower_bound_seconds = (
+            _phase_seconds(request_count=batch_count, workers=llm1_workers, request_seconds=request_seconds)
+            + _phase_seconds(request_count=batch_count, workers=llm2_workers, request_seconds=request_seconds)
+        )
+        upper_bound_seconds = (
+            lower_bound_seconds
+            + _phase_seconds(
+                request_count=max_candidate_pair_count,
+                workers=llm1_workers,
+                request_seconds=request_seconds,
+            )
+            + _phase_seconds(
+                request_count=max_candidate_pair_count,
+                workers=llm2_workers,
+                request_seconds=request_seconds,
+            )
+            + _phase_seconds(
+                request_count=max_dispute_count,
+                workers=llm3_workers,
+                request_seconds=request_seconds,
+            )
+        )
+        target_estimates.append(
+            {
+                "token": str(item.get("token") or ""),
+                "batch_count": batch_count,
+                "fragment_count": fragment_count,
+                "max_candidate_pair_count": max_candidate_pair_count,
+                "max_dispute_count": max_dispute_count,
+                "lower_bound_seconds": lower_bound_seconds,
+                "upper_bound_seconds": upper_bound_seconds,
+            }
+        )
+        total_batch_count += batch_count
+        total_fragment_count += fragment_count
+        total_max_candidate_pair_count += max_candidate_pair_count
+        total_max_dispute_count += max_dispute_count
+        total_lower_bound_seconds += lower_bound_seconds
+        total_upper_bound_seconds += upper_bound_seconds
+
+    return {
+        "request_seconds": max(1, int(request_seconds)),
+        "theme_count": safe_theme_count,
+        "batch_count": total_batch_count,
+        "fragment_count": total_fragment_count,
+        "max_candidate_pair_count": total_max_candidate_pair_count,
+        "max_dispute_count": total_max_dispute_count,
+        "lower_bound_seconds": total_lower_bound_seconds,
+        "upper_bound_seconds": total_upper_bound_seconds,
+        "llm1_workers": llm1_workers,
+        "llm2_workers": llm2_workers,
+        "llm3_workers": llm3_workers,
+        "targets": target_estimates,
+    }
+
+
 def analysis_targets_from_session(session_payload: dict[str, Any]) -> list[str]:
     return normalize_analysis_targets(_as_string_list(session_payload.get("analysis_targets")))
 
@@ -521,11 +650,22 @@ def build_stage2_manifest(
     stage2_context: Stage2Context,
     dotenv_path: str | Path | None = None,
     env_values: dict[str, str] | None = None,
+    model_slots: list[dict[str, Any]] | None = None,
+    timing_estimate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     workspace = Path(workspace_root).expanduser().resolve()
     outputs = Path(outputs_root).expanduser().resolve()
     project_dir = outputs / project_name
     stage2_dir = stage2_workspace_dir(project_dir)
+    resolved_model_slots = list(model_slots) if model_slots is not None else slot_summaries(
+        dotenv_path=dotenv_path,
+        env_values=env_values,
+    )
+    resolved_timing_estimate = dict(timing_estimate) if timing_estimate is not None else build_stage2_timing_estimate(
+        corpus_overview=corpus_overview,
+        theme_count=len(stage2_context.target_themes),
+        model_slots=resolved_model_slots,
+    )
     return {
         "stage2_manifest_version": 2,
         "generated_at": _now_iso(),
@@ -559,7 +699,8 @@ def build_stage2_manifest(
         "kanripo_root": str(Path(kanripo_root).expanduser().resolve()),
         "analysis_targets": normalize_analysis_targets(analysis_targets),
         "corpus_overview": corpus_overview,
-        "model_slots": slot_summaries(dotenv_path=dotenv_path, env_values=env_values),
+        "model_slots": resolved_model_slots,
+        "timing_estimate": resolved_timing_estimate,
     }
 
 

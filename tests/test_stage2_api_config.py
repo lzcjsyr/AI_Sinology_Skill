@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from runtime.stage2.api_config import resolve_provider_keys, slot_payload, slot_worker_limit
+from runtime.stage2.api_config import STAGE2_MODELS, fallback_payload, resolve_provider_keys, slot_payload, slot_worker_limit
 
 
 class Stage2ApiConfigTests(unittest.TestCase):
@@ -42,8 +42,27 @@ class Stage2ApiConfigTests(unittest.TestCase):
     def test_slot_payload_exposes_configured_max_concurrency(self) -> None:
         payload = slot_payload("llm3", env_values={"VOLCENGINE_API_KEY": "test-key"})
 
-        self.assertEqual(payload["max_concurrency"], 2)
-        self.assertEqual(slot_worker_limit("llm1"), 4)
+        self.assertEqual(payload["max_concurrency"], STAGE2_MODELS["llm3"].max_concurrency)
+        self.assertEqual(slot_worker_limit("llm1"), STAGE2_MODELS["llm1"].max_concurrency)
+
+    def test_fallback_payload_prefers_stage2_specific_openrouter_settings(self) -> None:
+        payload = fallback_payload(
+            env_values={
+                "OPENROUTER_API_KEY": "provider-key",
+                "STAGE2_FALLBACK_PROVIDER": "openrouter",
+                "STAGE2_FALLBACK_MODEL": "anthropic/claude-sonnet-4.6",
+                "STAGE2_FALLBACK_BASE_URL": "https://openrouter.ai/api/v1/chat/completions",
+                "STAGE2_FALLBACK_API_KEY": "fallback-key",
+                "STAGE2_FALLBACK_MAX_RETRIES": "3",
+            }
+        )
+
+        self.assertTrue(payload["enabled"])
+        self.assertEqual(payload["provider"], "openrouter")
+        self.assertEqual(payload["model"], "anthropic/claude-sonnet-4.6")
+        self.assertEqual(payload["base_url"], "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(payload["api_keys"], ("fallback-key",))
+        self.assertEqual(payload["max_retries"], 3)
 
 
 if __name__ == "__main__":

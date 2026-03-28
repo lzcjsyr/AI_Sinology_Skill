@@ -18,11 +18,13 @@ if __package__ in {None, ""}:
     from runtime.stage2.session import (
         Stage2Context,
         analysis_targets_from_session,
+        build_stage2_timing_estimate,
         build_stage2_manifest,
         ensure_stage2_workspace,
         load_stage2_context,
         load_stage2_session,
         save_stage2_session,
+        slot_summaries,
         stage2_session_path,
         stage2_workspace_dir,
         summarize_retrieval_progress,
@@ -36,11 +38,13 @@ else:
     from .session import (
         Stage2Context,
         analysis_targets_from_session,
+        build_stage2_timing_estimate,
         build_stage2_manifest,
         ensure_stage2_workspace,
         load_stage2_context,
         load_stage2_session,
         save_stage2_session,
+        slot_summaries,
         stage2_session_path,
         stage2_workspace_dir,
         summarize_retrieval_progress,
@@ -120,6 +124,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="执行模式下最多读取多少个分页 fragment；默认不限。",
     )
+    parser.add_argument("--llm1-workers", type=int, help="覆盖 llm1 并发数；默认使用运行时配置。")
+    parser.add_argument("--llm2-workers", type=int, help="覆盖 llm2 并发数；默认使用运行时配置。")
+    parser.add_argument("--llm3-workers", type=int, help="覆盖 llm3 并发数；默认使用运行时配置。")
     parser.add_argument("--force-rerun", action="store_true", help="忽略已缓存的 target 产物并重跑。")
     parser.add_argument(
         "--checkpoint-action",
@@ -253,25 +260,79 @@ def _print_selection_errors(issues: tuple[Any, ...]) -> None:
         print(f"  - {issue.token}: {issue.detail}")
 
 
-def _print_corpus_overview(overview: Any) -> None:
+def _format_int(value: object) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_duration(seconds: object) -> str:
+    try:
+        total_seconds = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return str(seconds)
+
+    if total_seconds < 60:
+        return f"{_format_int(total_seconds)} 秒"
+
+    total_minutes, remaining_seconds = divmod(total_seconds, 60)
+    if total_minutes < 60:
+        if remaining_seconds:
+            return f"{_format_int(total_minutes)} 分 {_format_int(remaining_seconds)} 秒"
+        return f"{_format_int(total_minutes)} 分"
+
+    total_hours, remaining_minutes = divmod(total_minutes, 60)
+    if total_hours < 24:
+        if remaining_minutes:
+            return f"{_format_int(total_hours)} 小时 {_format_int(remaining_minutes)} 分"
+        return f"{_format_int(total_hours)} 小时"
+
+    total_days, remaining_hours = divmod(total_hours, 24)
+    if remaining_hours:
+        return f"{_format_int(total_days)} 天 {_format_int(remaining_hours)} 小时"
+    return f"{_format_int(total_days)} 天"
+
+
+def _print_timing_estimate(timing_estimate: dict[str, Any] | None) -> None:
+    if not timing_estimate:
+        return
+    print(
+        f"估时 | 主题 {_format_int(timing_estimate.get('theme_count', 0))}"
+        f" | 片段 {_format_int(timing_estimate.get('fragment_count', 0))}"
+        f" | 批次 {_format_int(timing_estimate.get('batch_count', 0))}"
+        f" | 预估耗时 {_format_duration(timing_estimate.get('lower_bound_seconds', 0))}"
+        f" - {_format_duration(timing_estimate.get('upper_bound_seconds', 0))}"
+        f"（按单次请求 {_format_int(timing_estimate.get('request_seconds', 0))} 秒）"
+    )
+
+
+def _print_corpus_overview(overview: Any, timing_estimate: dict[str, Any] | None = None) -> None:
     print()
     print("调研范围统计（正文字符数仅供预估工作量使用）:")
     for item in overview.targets:
         level_label = "类目" if item.level == "family" else "目录"
         print(
             f"  - {item.token} [{level_label}]"
-            f" | 目录 {item.repo_dir_count}"
-            f" | 文本 {item.text_file_count}"
-            f" | 正文约 {item.text_char_count} 字"
+            f" | 目录 {_format_int(item.repo_dir_count)}"
+            f" | 文本 {_format_int(item.text_file_count)}"
+            f" | 正文约 {_format_int(item.text_char_count)} 字"
         )
     print(
-        f"合计 | 目录 {overview.repo_dir_count}"
-        f" | 文本 {overview.text_file_count}"
-        f" | 正文约 {overview.text_char_count} 字"
+        f"合计 | 目录 {_format_int(overview.repo_dir_count)}"
+        f" | 文本 {_format_int(overview.text_file_count)}"
+        f" | 正文约 {_format_int(overview.text_char_count)} 字"
     )
+    _print_timing_estimate(timing_estimate)
 
 
-def _prompt_analysis_targets(kanripo_root: Path, *, default_targets: list[str] | None = None) -> tuple[list[str], dict[str, object]]:
+def _prompt_analysis_targets(
+    kanripo_root: Path,
+    *,
+    default_targets: list[str] | None = None,
+    theme_count: int,
+    model_slots: list[dict[str, Any]],
+) -> tuple[list[str], dict[str, object], dict[str, Any]]:
     default_value = " ".join(default_targets or []) or None
     while True:
         raw_targets = _prompt(
@@ -287,9 +348,14 @@ def _prompt_analysis_targets(kanripo_root: Path, *, default_targets: list[str] |
             continue
 
         overview = measure_corpus_overview(kanripo_root, selection)
-        _print_corpus_overview(overview)
+        timing_estimate = build_stage2_timing_estimate(
+            corpus_overview=overview.as_dict(),
+            theme_count=theme_count,
+            model_slots=model_slots,
+        )
+        _print_corpus_overview(overview, timing_estimate)
         if _confirm("确认以上调研范围无误，并开始阶段二研究吗？", default=True):
-            return list(selection.analysis_targets), overview.as_dict()
+            return list(selection.analysis_targets), overview.as_dict(), timing_estimate
         default_value = " ".join(selection.analysis_targets)
 
 
@@ -397,10 +463,11 @@ def _emit_summary(
     print(f"项目: {payload['project_name']}")
     print(f"analysis_targets: {', '.join(payload['analysis_targets'])}")
     print(
-        f"预估正文规模: {payload['corpus_overview']['text_char_count']} 字"
-        f" | 文本 {payload['corpus_overview']['text_file_count']}"
-        f" | 目录 {payload['corpus_overview']['repo_dir_count']}"
+        f"预估正文规模: {_format_int(payload['corpus_overview']['text_char_count'])} 字"
+        f" | 文本 {_format_int(payload['corpus_overview']['text_file_count'])}"
+        f" | 目录 {_format_int(payload['corpus_overview']['repo_dir_count'])}"
     )
+    _print_timing_estimate(payload.get("timing_estimate"))
     print(f"阶段二工作目录: {payload['stage2_workspace_dir']}")
     if session_output_path:
         print(f"会话文件: {session_output_path}")
@@ -477,6 +544,14 @@ def _build_progress_printer(*, as_json: bool):
                     f" | 当前批次={event['batch_id']}"
                     f" | 当前主题={event['theme']}"
                 )
+        elif event_name == "slot_waiting":
+            stage = str(event.get("stage") or "targeted")
+            stage_label = "粗筛" if stage == "coarse" else "精筛"
+            line = (
+                f"[stage2] {event['target']} {event['slot']} {stage_label}等待中"
+                f" | 已完成={event['completed']}/{event['total']}"
+                f" | in_flight={event['in_flight']}"
+            )
         elif event_name == "consensus_ready":
             line = (
                 f"[stage2] {event['target']} 双模型比对完成"
@@ -491,6 +566,12 @@ def _build_progress_printer(*, as_json: bool):
                 f"[stage2] {event['target']} llm3 仲裁进度"
                 f" | {event['completed']}/{event['total']}"
                 f" | 当前={event['piece_id']}"
+            )
+        elif event_name == "arbitration_waiting":
+            line = (
+                f"[stage2] {event['target']} llm3 仲裁等待中"
+                f" | 已完成={event['completed']}/{event['total']}"
+                f" | in_flight={event['in_flight']}"
             )
         elif event_name == "target_completed":
             line = (
@@ -554,6 +635,10 @@ def main() -> int:
     if not args.json:
         _print_intro(project_dir, stage2_context, kanripo_root)
 
+    resolved_env_file = _resolved_env_file(args.env_file)
+    model_slots = slot_summaries(dotenv_path=resolved_env_file)
+    theme_count = len(stage2_context.target_themes)
+
     if args.targets:
         selection = resolve_analysis_targets(kanripo_root, raw_input=args.targets)
         if not selection.tokens:
@@ -564,12 +649,19 @@ def main() -> int:
         analysis_targets = list(selection.analysis_targets)
         overview = measure_corpus_overview(kanripo_root, selection)
         corpus_overview = overview.as_dict()
+        timing_estimate = build_stage2_timing_estimate(
+            corpus_overview=corpus_overview,
+            theme_count=theme_count,
+            model_slots=model_slots,
+        )
         if not args.json:
-            _print_corpus_overview(overview)
+            _print_corpus_overview(overview, timing_estimate)
     else:
-        analysis_targets, corpus_overview = _prompt_analysis_targets(
+        analysis_targets, corpus_overview, timing_estimate = _prompt_analysis_targets(
             kanripo_root,
             default_targets=analysis_targets_from_session(resumed_session),
+            theme_count=theme_count,
+            model_slots=model_slots,
         )
 
     manifest = build_stage2_manifest(
@@ -580,7 +672,9 @@ def main() -> int:
         analysis_targets=analysis_targets,
         corpus_overview=corpus_overview,
         stage2_context=stage2_context,
-        dotenv_path=_resolved_env_file(args.env_file),
+        dotenv_path=resolved_env_file,
+        model_slots=model_slots,
+        timing_estimate=timing_estimate,
     )
 
     manifest_output_path: Path | None = None
@@ -610,8 +704,11 @@ def main() -> int:
     if should_run:
         summary = run_stage2_pipeline(
             project_dir=project_dir,
-            dotenv_path=_resolved_env_file(args.env_file),
+            dotenv_path=resolved_env_file,
             max_fragments=args.max_fragments,
+            llm1_workers=args.llm1_workers,
+            llm2_workers=args.llm2_workers,
+            llm3_workers=args.llm3_workers,
             force_rerun=args.force_rerun,
             progress_callback=_build_progress_printer(as_json=args.json),
         )

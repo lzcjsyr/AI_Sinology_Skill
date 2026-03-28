@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
 import json
 from pathlib import Path
 import re
+from socket import timeout as SocketTimeout
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Iterator, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .api_config import screening_batch_char_limit, slot_payload, slot_worker_limit
+from .api_config import STAGE2_RUNTIME_DEFAULTS, fallback_payload, screening_batch_char_limit, slot_payload, slot_worker_limit
 from .catalog import (
     PAGE_MARKER_PATTERN,
     AnalysisTargetSelection,
@@ -53,6 +54,8 @@ DISPUTES_FILE_NAME = "disputes.jsonl"
 ARBITRATION_FILE_NAME = "llm3_arbitration.jsonl"
 FINAL_FILE_NAME = "final_records.jsonl"
 SUMMARY_FILE_NAME = "target_summary.json"
+MANUAL_REVIEW_FILE_NAME = "manual_review_queue.jsonl"
+MANUAL_REVIEW_REPORT_FILE_NAME = "MANUAL_REVIEW_REQUIRED.md"
 TARGETS_DIR_NAME = "targets"
 FINAL_CORPUS_FILE_NAME = "2_primary_corpus.yaml"
 PIPELINE_STATE_VERSION = 2
@@ -60,10 +63,37 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 HTTP_429_MAX_RETRIES = 4
 HTTP_429_BACKOFF_SECONDS = 2.0
 HTTP_429_BACKOFF_CAP_SECONDS = 30.0
+TRANSIENT_HTTP_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
+WorkItem = TypeVar("WorkItem")
+TaskResult = TypeVar("TaskResult")
+MANUAL_REVIEW_REQUIRED_REASON = "MANUAL_REVIEW_REQUIRED"
 
 
 class Stage2RunnerError(RuntimeError):
     """阶段二执行器错误。"""
+
+
+class Stage2FormatError(Stage2RunnerError):
+    """模型返回结构不符合阶段二契约。"""
+
+
+class Stage2FallbackExhaustedError(Stage2FormatError):
+    """主模型与 fallback 均未能返回可用结构。"""
+
+    def __init__(
+        self,
+        *,
+        primary_error: str,
+        fallback_errors: list[str],
+        fallback_model: str,
+    ) -> None:
+        self.primary_error = primary_error
+        self.fallback_errors = list(fallback_errors)
+        self.fallback_model = fallback_model
+        detail = "; ".join(self.fallback_errors) if self.fallback_errors else "无返回"
+        super().__init__(
+            f"主模型格式失败：{primary_error} | fallback={fallback_model} 连续失败 {len(self.fallback_errors)} 次：{detail}"
+        )
 
 
 @dataclass(frozen=True)
@@ -106,6 +136,18 @@ class Batch:
 
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat()
+
+
+def _request_timeout_seconds() -> float:
+    return max(5.0, float(STAGE2_RUNTIME_DEFAULTS.get("request_timeout_seconds", 120.0) or 120.0))
+
+
+def _network_error_max_retries() -> int:
+    return max(0, int(STAGE2_RUNTIME_DEFAULTS.get("network_error_max_retries", 3) or 3))
+
+
+def _stall_heartbeat_seconds() -> float:
+    return max(5.0, float(STAGE2_RUNTIME_DEFAULTS.get("stall_heartbeat_seconds", 30.0) or 30.0))
 
 
 def _emit_progress(progress_callback: ProgressCallback | None, **payload: Any) -> None:
@@ -250,20 +292,20 @@ def _theme_names(target_themes: list[dict[str, str]]) -> list[str]:
 def _extract_json_object(text: str) -> dict[str, Any]:
     content = CODE_FENCE_PATTERN.sub("", str(text or "").strip())
     if not content:
-        raise Stage2RunnerError("模型返回为空，无法解析 JSON。")
+        raise Stage2FormatError("模型返回为空，无法解析 JSON。")
     try:
         payload = json.loads(content)
     except json.JSONDecodeError:
         start = content.find("{")
         end = content.rfind("}")
         if start < 0 or end <= start:
-            raise Stage2RunnerError(f"模型输出不是合法 JSON: {content[:400]}") from None
+            raise Stage2FormatError(f"模型输出不是合法 JSON: {content[:400]}") from None
         try:
             payload = json.loads(content[start : end + 1])
         except json.JSONDecodeError as exc:
-            raise Stage2RunnerError(f"模型输出 JSON 解析失败: {content[:400]}") from exc
+            raise Stage2FormatError(f"模型输出 JSON 解析失败: {content[:400]}") from exc
     if not isinstance(payload, dict):
-        raise Stage2RunnerError("模型输出顶层必须是 JSON 对象。")
+        raise Stage2FormatError("模型输出顶层必须是 JSON 对象。")
     return payload
 
 
@@ -286,7 +328,10 @@ class OpenAICompatClient:
         base_url: str,
         api_keys: tuple[str, ...],
         slot: str,
+        provider: str = "",
         rate_controller: SlotRateController | None = None,
+        fallback_client: OpenAICompatClient | None = None,
+        fallback_max_retries: int = 0,
     ) -> None:
         if not api_keys:
             raise Stage2RunnerError(f"{slot} 未配置 API key。")
@@ -294,7 +339,10 @@ class OpenAICompatClient:
         self.base_url = base_url
         self.api_keys = api_keys
         self.slot = slot
+        self.provider = provider
         self.rate_controller = rate_controller
+        self.fallback_client = fallback_client
+        self.fallback_max_retries = max(0, int(fallback_max_retries))
 
     def effective_worker_limit(self, *, requested_workers: int, estimated_tokens: int) -> int:
         if self.rate_controller is None:
@@ -315,6 +363,8 @@ class OpenAICompatClient:
         if not allow_response_format:
             body.pop("response_format", None)
         attempt = 0
+        request_timeout = _request_timeout_seconds()
+        network_retry_limit = _network_error_max_retries()
         while True:
             reservation = (
                 self.rate_controller.acquire(estimated_tokens=estimated_tokens)
@@ -332,7 +382,7 @@ class OpenAICompatClient:
                 method="POST",
             )
             try:
-                with urlopen(request, timeout=180) as response:
+                with urlopen(request, timeout=request_timeout) as response:
                     response_payload = json.loads(response.read().decode("utf-8"))
                     if reservation is not None:
                         usage = response_payload.get("usage") or {}
@@ -353,14 +403,18 @@ class OpenAICompatClient:
                     )
                 if reservation is not None:
                     self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
-                if exc.code == 429 and attempt < HTTP_429_MAX_RETRIES:
+                if exc.code in TRANSIENT_HTTP_STATUS_CODES and attempt < min(HTTP_429_MAX_RETRIES, network_retry_limit):
                     attempt += 1
                     time.sleep(self._retry_delay_seconds(exc, attempt=attempt))
                     continue
                 raise Stage2RunnerError(f"{self.slot} 请求失败: HTTP {exc.code} {message[:500]}") from exc
-            except URLError as exc:
+            except (URLError, TimeoutError, SocketTimeout) as exc:
                 if reservation is not None:
                     self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
+                if attempt < network_retry_limit:
+                    attempt += 1
+                    time.sleep(self._network_retry_delay_seconds(attempt=attempt))
+                    continue
                 raise Stage2RunnerError(f"{self.slot} 网络错误: {exc}") from exc
 
     def _retry_delay_seconds(self, exc: HTTPError, *, attempt: int) -> float:
@@ -370,6 +424,9 @@ class OpenAICompatClient:
                 return max(0.0, min(float(retry_after), HTTP_429_BACKOFF_CAP_SECONDS))
             except (TypeError, ValueError):
                 pass
+        return min(HTTP_429_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)), HTTP_429_BACKOFF_CAP_SECONDS)
+
+    def _network_retry_delay_seconds(self, *, attempt: int) -> float:
         return min(HTTP_429_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)), HTTP_429_BACKOFF_CAP_SECONDS)
 
     def chat_json(
@@ -393,7 +450,7 @@ class OpenAICompatClient:
         )
         choices = response.get("choices") or []
         if not choices:
-            raise Stage2RunnerError(f"{self.slot} 未返回 choices。")
+            raise Stage2FormatError(f"{self.slot} 未返回 choices。")
         message = choices[0].get("message") or {}
         content = message.get("content")
         if isinstance(content, list):
@@ -516,7 +573,7 @@ def _normalize_coarse_screening_payload(
 ) -> list[dict[str, Any]]:
     raw_results = payload.get("themes")
     if not isinstance(raw_results, list):
-        raise Stage2RunnerError("粗筛返回缺少 themes 列表。")
+        raise Stage2FormatError("粗筛返回缺少 themes 列表。")
 
     theme_names = _theme_names(target_themes)
     match_map: dict[str, dict[str, Any]] = {}
@@ -547,7 +604,7 @@ def _normalize_targeted_screening_payload(
 ) -> list[dict[str, Any]]:
     raw_results = payload.get("results")
     if not isinstance(raw_results, list):
-        raise Stage2RunnerError(f"{batch.batch_id} 返回缺少 results 列表。")
+        raise Stage2FormatError(f"{batch.batch_id} 返回缺少 results 列表。")
 
     expected_piece_ids = list(batch.piece_ids)
     expected_set = set(expected_piece_ids)
@@ -593,21 +650,36 @@ def _screen_batch_coarse(
     batch: Batch,
     target_themes: list[dict[str, str]],
 ) -> dict[str, Any]:
-    payload, usage = client.chat_json(
-        messages=_coarse_screening_messages(target_themes=target_themes, batch=batch),
-        max_tokens=400,
-    )
-    results = _normalize_coarse_screening_payload(payload, target_themes=target_themes)
-    return {
-        "slot": slot,
-        "model": client.model,
-        "batch_id": batch.batch_id,
-        "source_file": batch.source_file,
-        "repo_dir": batch.repo_dir,
-        "themes": results,
-        "usage": usage,
-        "generated_at": _now_iso(),
-    }
+    def invoke(active_client: OpenAICompatClient) -> dict[str, Any]:
+        payload, usage = active_client.chat_json(
+            messages=_coarse_screening_messages(target_themes=target_themes, batch=batch),
+            max_tokens=400,
+        )
+        return {
+            "slot": slot,
+            "model": active_client.model,
+            "provider": active_client.provider,
+            "batch_id": batch.batch_id,
+            "source_file": batch.source_file,
+            "repo_dir": batch.repo_dir,
+            "themes": _normalize_coarse_screening_payload(payload, target_themes=target_themes),
+            "usage": usage,
+            "generated_at": _now_iso(),
+            "used_format_fallback": active_client is not client,
+        }
+
+    try:
+        return _run_with_format_fallback(client=client, invoke=invoke)
+    except Stage2FallbackExhaustedError as exc:
+        return _coarse_manual_review_row(
+            client=client,
+            slot=slot,
+            batch=batch,
+            target_themes=target_themes,
+            exc=exc,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise Stage2RunnerError(f"{slot} 粗筛失败 | batch={batch.batch_id}: {exc}") from exc
 
 
 def _screen_batch_targeted(
@@ -618,24 +690,39 @@ def _screen_batch_targeted(
     theme: str,
     fragment_map: dict[str, Fragment],
 ) -> dict[str, Any]:
-    payload, usage = client.chat_json(
-        messages=_targeted_screening_messages(theme=theme, batch=batch, fragment_map=fragment_map),
-        max_tokens=1200,
-    )
-    results = _normalize_targeted_screening_payload(payload, batch=batch)
-    return {
-        "slot": slot,
-        "model": client.model,
-        "batch_id": batch.batch_id,
-        "batch_theme_key": f"{batch.batch_id}::{theme}",
-        "matched_theme": theme,
-        "source_file": batch.source_file,
-        "repo_dir": batch.repo_dir,
-        "piece_ids": list(batch.piece_ids),
-        "results": results,
-        "usage": usage,
-        "generated_at": _now_iso(),
-    }
+    def invoke(active_client: OpenAICompatClient) -> dict[str, Any]:
+        payload, usage = active_client.chat_json(
+            messages=_targeted_screening_messages(theme=theme, batch=batch, fragment_map=fragment_map),
+            max_tokens=1200,
+        )
+        return {
+            "slot": slot,
+            "model": active_client.model,
+            "provider": active_client.provider,
+            "batch_id": batch.batch_id,
+            "batch_theme_key": f"{batch.batch_id}::{theme}",
+            "matched_theme": theme,
+            "source_file": batch.source_file,
+            "repo_dir": batch.repo_dir,
+            "piece_ids": list(batch.piece_ids),
+            "results": _normalize_targeted_screening_payload(payload, batch=batch),
+            "usage": usage,
+            "generated_at": _now_iso(),
+            "used_format_fallback": active_client is not client,
+        }
+
+    try:
+        return _run_with_format_fallback(client=client, invoke=invoke)
+    except Stage2FallbackExhaustedError as exc:
+        return _targeted_manual_review_row(
+            client=client,
+            slot=slot,
+            batch=batch,
+            theme=theme,
+            exc=exc,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise Stage2RunnerError(f"{slot} 精筛失败 | batch={batch.batch_id} | theme={theme}: {exc}") from exc
 
 
 def _normalize_arbitration_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -651,25 +738,328 @@ def _arbitrate_dispute(
     client: OpenAICompatClient,
     dispute: dict[str, Any],
 ) -> dict[str, Any]:
-    payload, usage = client.chat_json(
-        messages=_arbitration_messages(
-            theme=str(dispute["matched_theme"]),
-            original_text=str(dispute["original_text"]),
-            llm1_result=dispute["llm1_result"],
-            llm2_result=dispute["llm2_result"],
-        ),
-        max_tokens=1200,
-    )
-    decision = _normalize_arbitration_payload(payload)
+    def invoke(active_client: OpenAICompatClient) -> dict[str, Any]:
+        payload, usage = active_client.chat_json(
+            messages=_arbitration_messages(
+                theme=str(dispute["matched_theme"]),
+                original_text=str(dispute["original_text"]),
+                llm1_result=dispute["llm1_result"],
+                llm2_result=dispute["llm2_result"],
+            ),
+            max_tokens=1200,
+        )
+        return {
+            "dispute_key": dispute["dispute_key"],
+            "piece_id": dispute["piece_id"],
+            "source_file": dispute["source_file"],
+            "matched_theme": dispute["matched_theme"],
+            "decision": _normalize_arbitration_payload(payload),
+            "usage": usage,
+            "generated_at": _now_iso(),
+            "provider": active_client.provider,
+            "model": active_client.model,
+            "used_format_fallback": active_client is not client,
+        }
+
+    try:
+        return _run_with_format_fallback(client=client, invoke=invoke)
+    except Stage2FallbackExhaustedError as exc:
+        return _arbitration_manual_review_row(client=client, dispute=dispute, exc=exc)
+    except Exception as exc:  # noqa: BLE001
+        raise Stage2RunnerError(f"llm3 仲裁失败 | piece_id={dispute['piece_id']}: {exc}") from exc
+
+
+def _iter_windowed_futures(
+    *,
+    executor: ThreadPoolExecutor,
+    items: Iterable[WorkItem],
+    max_in_flight: int,
+    submit_job: Callable[[WorkItem], Future[Any]],
+    on_wait: Callable[[int], None] | None = None,
+) -> Iterator[tuple[WorkItem, Future[Any]]]:
+    pending: dict[Future[Any], WorkItem] = {}
+    iterator = iter(items)
+    window_size = max(1, int(max_in_flight))
+
+    def refill() -> None:
+        while len(pending) < window_size:
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return
+            pending[submit_job(item)] = item
+
+    refill()
+    while pending:
+        done, _ = wait(
+            pending.keys(),
+            timeout=_stall_heartbeat_seconds(),
+            return_when=FIRST_COMPLETED,
+        )
+        if not done:
+            if on_wait is not None:
+                on_wait(len(pending))
+            continue
+        for future in done:
+            item = pending.pop(future)
+            yield item, future
+        refill()
+
+
+def _run_with_format_fallback(
+    *,
+    client: OpenAICompatClient,
+    invoke: Callable[[OpenAICompatClient], TaskResult],
+) -> TaskResult:
+    try:
+        return invoke(client)
+    except Stage2FormatError as primary_error:
+        fallback_client = client.fallback_client
+        if fallback_client is None or client.fallback_max_retries <= 0:
+            raise
+        fallback_errors: list[str] = []
+        for _ in range(client.fallback_max_retries):
+            try:
+                return invoke(fallback_client)
+            except Stage2FormatError as fallback_error:
+                fallback_errors.append(str(fallback_error))
+        raise Stage2FallbackExhaustedError(
+            primary_error=str(primary_error),
+            fallback_errors=fallback_errors,
+            fallback_model=fallback_client.model,
+        ) from primary_error
+
+
+def _manual_review_reason(exc: Stage2FallbackExhaustedError) -> str:
+    return f"自动兜底失败，需人工审核。{exc}"
+
+
+def _coarse_manual_review_row(
+    *,
+    client: OpenAICompatClient,
+    slot: str,
+    batch: Batch,
+    target_themes: list[dict[str, str]],
+    exc: Stage2FallbackExhaustedError,
+) -> dict[str, Any]:
+    fallback_client = client.fallback_client
+    return {
+        "slot": slot,
+        "model": fallback_client.model if fallback_client is not None else client.model,
+        "provider": fallback_client.provider if fallback_client is not None else client.provider,
+        "batch_id": batch.batch_id,
+        "source_file": batch.source_file,
+        "repo_dir": batch.repo_dir,
+        "themes": [{"theme": theme, "is_relevant": True} for theme in _theme_names(target_themes)],
+        "usage": {},
+        "generated_at": _now_iso(),
+        "used_format_fallback": True,
+        "needs_manual_review": True,
+        "manual_review_stage": "coarse",
+        "manual_review_key": batch.batch_id,
+        "manual_review_reason": _manual_review_reason(exc),
+        "primary_error": exc.primary_error,
+        "fallback_errors": exc.fallback_errors,
+        "piece_ids": list(batch.piece_ids),
+    }
+
+
+def _targeted_manual_review_row(
+    *,
+    client: OpenAICompatClient,
+    slot: str,
+    batch: Batch,
+    theme: str,
+    exc: Stage2FallbackExhaustedError,
+) -> dict[str, Any]:
+    fallback_client = client.fallback_client
+    return {
+        "slot": slot,
+        "model": fallback_client.model if fallback_client is not None else client.model,
+        "provider": fallback_client.provider if fallback_client is not None else client.provider,
+        "batch_id": batch.batch_id,
+        "batch_theme_key": f"{batch.batch_id}::{theme}",
+        "matched_theme": theme,
+        "source_file": batch.source_file,
+        "repo_dir": batch.repo_dir,
+        "piece_ids": list(batch.piece_ids),
+        "results": [
+            {
+                "piece_id": piece_id,
+                "is_relevant": True,
+                "reason": MANUAL_REVIEW_REQUIRED_REASON,
+            }
+            for piece_id in batch.piece_ids
+        ],
+        "usage": {},
+        "generated_at": _now_iso(),
+        "used_format_fallback": True,
+        "needs_manual_review": True,
+        "manual_review_stage": "targeted",
+        "manual_review_key": f"{batch.batch_id}::{theme}",
+        "manual_review_reason": _manual_review_reason(exc),
+        "primary_error": exc.primary_error,
+        "fallback_errors": exc.fallback_errors,
+    }
+
+
+def _arbitration_manual_review_row(
+    *,
+    client: OpenAICompatClient,
+    dispute: dict[str, Any],
+    exc: Stage2FallbackExhaustedError,
+) -> dict[str, Any]:
+    fallback_client = client.fallback_client
     return {
         "dispute_key": dispute["dispute_key"],
         "piece_id": dispute["piece_id"],
         "source_file": dispute["source_file"],
         "matched_theme": dispute["matched_theme"],
-        "decision": decision,
-        "usage": usage,
+        "original_text": dispute["original_text"],
+        "decision": {
+            "is_relevant": True,
+            "reason": MANUAL_REVIEW_REQUIRED_REASON,
+        },
+        "usage": {},
         "generated_at": _now_iso(),
+        "provider": fallback_client.provider if fallback_client is not None else client.provider,
+        "model": fallback_client.model if fallback_client is not None else client.model,
+        "used_format_fallback": True,
+        "needs_manual_review": True,
+        "manual_review_stage": "arbitration",
+        "manual_review_key": dispute["dispute_key"],
+        "manual_review_reason": _manual_review_reason(exc),
+        "primary_error": exc.primary_error,
+        "fallback_errors": exc.fallback_errors,
     }
+
+
+def _manual_review_entries_from_row(
+    *,
+    row: dict[str, Any],
+    fragment_map: dict[str, Fragment],
+) -> list[dict[str, Any]]:
+    if not bool(row.get("needs_manual_review")):
+        return []
+
+    stage = str(row.get("manual_review_stage") or "")
+    generated_at = str(row.get("generated_at") or _now_iso())
+    base = {
+        "manual_review_stage": stage,
+        "slot": str(row.get("slot") or ""),
+        "batch_id": str(row.get("batch_id") or ""),
+        "manual_review_reason": str(row.get("manual_review_reason") or ""),
+        "primary_error": str(row.get("primary_error") or ""),
+        "fallback_errors": list(row.get("fallback_errors") or []),
+        "generated_at": generated_at,
+    }
+    entries: list[dict[str, Any]] = []
+
+    if stage == "coarse":
+        candidate_themes = [str(item.get("theme") or "") for item in row.get("themes") or [] if str(item.get("theme") or "").strip()]
+        for piece_id in row.get("piece_ids") or []:
+            fragment = fragment_map.get(str(piece_id))
+            entries.append(
+                {
+                    **base,
+                    "manual_review_key": f"{row.get('manual_review_key')}::{piece_id}",
+                    "piece_id": str(piece_id),
+                    "source_file": fragment.source_file if fragment is not None else str(row.get("source_file") or ""),
+                    "repo_dir": fragment.repo_dir if fragment is not None else str(row.get("repo_dir") or ""),
+                    "text_file": fragment.text_file if fragment is not None else "",
+                    "matched_theme": "",
+                    "candidate_themes": candidate_themes,
+                    "original_text": fragment.original_text if fragment is not None else "",
+                }
+            )
+        return entries
+
+    if stage == "targeted":
+        matched_theme = str(row.get("matched_theme") or "")
+        for piece_id in row.get("piece_ids") or []:
+            fragment = fragment_map.get(str(piece_id))
+            entries.append(
+                {
+                    **base,
+                    "manual_review_key": f"{row.get('manual_review_key')}::{piece_id}",
+                    "piece_id": str(piece_id),
+                    "source_file": fragment.source_file if fragment is not None else str(row.get("source_file") or ""),
+                    "repo_dir": fragment.repo_dir if fragment is not None else str(row.get("repo_dir") or ""),
+                    "text_file": fragment.text_file if fragment is not None else "",
+                    "matched_theme": matched_theme,
+                    "candidate_themes": [matched_theme] if matched_theme else [],
+                    "original_text": fragment.original_text if fragment is not None else "",
+                }
+            )
+        return entries
+
+    piece_id = str(row.get("piece_id") or "")
+    fragment = fragment_map.get(piece_id)
+    entries.append(
+        {
+            **base,
+            "manual_review_key": str(row.get("manual_review_key") or ""),
+            "piece_id": piece_id,
+            "source_file": fragment.source_file if fragment is not None else str(row.get("source_file") or ""),
+            "repo_dir": fragment.repo_dir if fragment is not None else str(row.get("repo_dir") or ""),
+            "text_file": fragment.text_file if fragment is not None else "",
+            "matched_theme": str(row.get("matched_theme") or ""),
+            "candidate_themes": [str(row.get("matched_theme") or "")] if str(row.get("matched_theme") or "").strip() else [],
+            "original_text": fragment.original_text if fragment is not None else str(row.get("original_text") or ""),
+        }
+    )
+    return entries
+
+
+def _render_manual_review_report(target_dir: Path) -> None:
+    rows = read_jsonl(_manual_review_path(target_dir))
+    lines = [
+        "# Manual Review Required",
+        "",
+        "以下 fragment 需要人工审核。自动筛查与 fallback 均未能稳定返回可用结构化结果。",
+        "",
+    ]
+    if not rows:
+        lines.append("当前无需要人工审核的 fragment。")
+        _manual_review_report_path(target_dir).write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return
+
+    for index, row in enumerate(rows, start=1):
+        piece_id = str(row.get("piece_id") or "")
+        theme = str(row.get("matched_theme") or "")
+        candidate_themes = [str(item) for item in row.get("candidate_themes") or [] if str(item).strip()]
+        theme_line = theme or (" / ".join(candidate_themes) if candidate_themes else "待人工判断主题")
+        lines.extend(
+            [
+                f"## {index}. {piece_id or '未知 piece_id'} | {row.get('manual_review_stage') or 'unknown'} | {theme_line}",
+                "",
+                f"- 文献: {row.get('source_file') or ''}",
+                f"- 目录: {row.get('repo_dir') or ''}",
+                f"- 批次: {row.get('batch_id') or ''}",
+                f"- 时间: {row.get('generated_at') or ''}",
+                f"- 原因: {row.get('manual_review_reason') or ''}",
+            ]
+        )
+        if candidate_themes and not theme:
+            lines.append(f"- 候选主题: {'; '.join(candidate_themes)}")
+        lines.extend(
+            [
+                "",
+                "```text",
+                str(row.get("original_text") or ""),
+                "```",
+                "",
+            ]
+        )
+    _manual_review_report_path(target_dir).write_text("\n".join(lines), encoding="utf-8")
+
+
+def _append_manual_review_entries(target_dir: Path, row: dict[str, Any], fragment_map: dict[str, Fragment]) -> None:
+    entries = _manual_review_entries_from_row(row=row, fragment_map=fragment_map)
+    for entry in entries:
+        append_jsonl(_manual_review_path(target_dir), entry)
+    if entries:
+        _render_manual_review_report(target_dir)
 
 
 def _target_workspace_dir(project_dir: Path, token: str) -> Path:
@@ -720,6 +1110,14 @@ def _final_path(target_dir: Path) -> Path:
 
 def _summary_path(target_dir: Path) -> Path:
     return target_dir / SUMMARY_FILE_NAME
+
+
+def _manual_review_path(target_dir: Path) -> Path:
+    return target_dir / MANUAL_REVIEW_FILE_NAME
+
+
+def _manual_review_report_path(target_dir: Path) -> Path:
+    return target_dir / MANUAL_REVIEW_REPORT_FILE_NAME
 
 
 def _artifact_state_path(target_dir: Path) -> Path:
@@ -875,6 +1273,7 @@ def _run_coarse_batches(
     client: OpenAICompatClient,
     slot: str,
     batches: list[Batch],
+    fragment_map: dict[str, Fragment],
     target_themes: list[dict[str, str]],
     output_path: Path,
     workers: int,
@@ -914,42 +1313,57 @@ def _run_coarse_batches(
         ),
     )
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        pending = {
-            executor.submit(_screen_batch_coarse, client=client, slot=slot, batch=batch, target_themes=target_themes): batch
-            for batch in pending_batches
-        }
-        while pending:
-            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
-            for future in done:
-                batch = pending.pop(future)
-                row = future.result()
-                append_jsonl(output_path, row)
-                cached[batch.batch_id] = row
-                finished_count += 1
-                _update_target_state(
-                    target_dir,
-                    phase="coarse_screening",
-                    batch_count=len(batches),
-                    **{f"{slot}_completed_batches": finished_count},
-                )
-                update_stage2_session_checkpoint(
-                    project_dir,
-                    action="checkpoint",
-                    target=target_token,
-                    cursor=f"{slot}:coarse_batch={finished_count}/{len(batches)}",
-                    piece_id=batch.piece_ids[-1] if batch.piece_ids else "",
-                    note=f"{slot} 粗筛已完成 {finished_count}/{len(batches)} 个批次",
-                )
-                _emit_progress(
-                    progress_callback,
-                    event="slot_progress",
-                    target=target_token,
-                    slot=slot,
-                    stage="coarse",
-                    completed=finished_count,
-                    total=len(batches),
-                    batch_id=batch.batch_id,
-                )
+        for batch, future in _iter_windowed_futures(
+            executor=executor,
+            items=pending_batches,
+            max_in_flight=effective_workers,
+            submit_job=lambda item: executor.submit(
+                _screen_batch_coarse,
+                client=client,
+                slot=slot,
+                batch=item,
+                target_themes=target_themes,
+            ),
+            on_wait=lambda in_flight: _emit_progress(
+                progress_callback,
+                event="slot_waiting",
+                target=target_token,
+                slot=slot,
+                stage="coarse",
+                completed=finished_count,
+                total=len(batches),
+                in_flight=in_flight,
+            ),
+        ):
+            row = future.result()
+            append_jsonl(output_path, row)
+            _append_manual_review_entries(target_dir, row, fragment_map)
+            cached[batch.batch_id] = row
+            finished_count += 1
+            _update_target_state(
+                target_dir,
+                phase="coarse_screening",
+                batch_count=len(batches),
+                **{f"{slot}_completed_batches": finished_count},
+            )
+            update_stage2_session_checkpoint(
+                project_dir,
+                action="checkpoint",
+                target=target_token,
+                cursor=f"{slot}:coarse_batch={finished_count}/{len(batches)}",
+                piece_id=batch.piece_ids[-1] if batch.piece_ids else "",
+                note=f"{slot} 粗筛已完成 {finished_count}/{len(batches)} 个批次",
+            )
+            _emit_progress(
+                progress_callback,
+                event="slot_progress",
+                target=target_token,
+                slot=slot,
+                stage="coarse",
+                completed=finished_count,
+                total=len(batches),
+                batch_id=batch.batch_id,
+            )
 
     return [cached[batch_map_key.batch_id] for batch_map_key in batches if batch_map_key.batch_id in cached]
 
@@ -1047,50 +1461,59 @@ def _run_targeted_pairs(
         ),
     )
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        pending = {
-            executor.submit(
+        for pair, future in _iter_windowed_futures(
+            executor=executor,
+            items=pending_pairs,
+            max_in_flight=effective_workers,
+            submit_job=lambda item: executor.submit(
                 _screen_batch_targeted,
                 client=client,
                 slot=slot,
-                batch=batch_map[str(pair["batch_id"])],
-                theme=str(pair["matched_theme"]),
+                batch=batch_map[str(item["batch_id"])],
+                theme=str(item["matched_theme"]),
                 fragment_map=fragment_map,
-            ): pair
-            for pair in pending_pairs
-        }
-        while pending:
-            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
-            for future in done:
-                pair = pending.pop(future)
-                row = future.result()
-                append_jsonl(output_path, row)
-                cached[str(pair["batch_theme_key"])] = row
-                finished_count += 1
-                _update_target_state(
-                    target_dir,
-                    phase="targeted_screening",
-                    candidate_pair_count=len(candidate_pairs),
-                    **{f"{slot}_completed_pairs": finished_count},
-                )
-                update_stage2_session_checkpoint(
-                    project_dir,
-                    action="checkpoint",
-                    target=target_token,
-                    cursor=f"{slot}:targeted_pair={finished_count}/{len(candidate_pairs)}",
-                    piece_id=str((pair.get("piece_ids") or [""])[-1] or ""),
-                    note=f"{slot} 精筛已完成 {finished_count}/{len(candidate_pairs)} 个候选主题",
-                )
-                _emit_progress(
-                    progress_callback,
-                    event="slot_progress",
-                    target=target_token,
-                    slot=slot,
-                    stage="targeted",
-                    completed=finished_count,
-                    total=len(candidate_pairs),
-                    batch_id=str(pair["batch_id"]),
-                    theme=str(pair["matched_theme"]),
-                )
+            ),
+            on_wait=lambda in_flight: _emit_progress(
+                progress_callback,
+                event="slot_waiting",
+                target=target_token,
+                slot=slot,
+                stage="targeted",
+                completed=finished_count,
+                total=len(candidate_pairs),
+                in_flight=in_flight,
+            ),
+        ):
+            row = future.result()
+            append_jsonl(output_path, row)
+            _append_manual_review_entries(target_dir, row, fragment_map)
+            cached[str(pair["batch_theme_key"])] = row
+            finished_count += 1
+            _update_target_state(
+                target_dir,
+                phase="targeted_screening",
+                candidate_pair_count=len(candidate_pairs),
+                **{f"{slot}_completed_pairs": finished_count},
+            )
+            update_stage2_session_checkpoint(
+                project_dir,
+                action="checkpoint",
+                target=target_token,
+                cursor=f"{slot}:targeted_pair={finished_count}/{len(candidate_pairs)}",
+                piece_id=str((pair.get("piece_ids") or [""])[-1] or ""),
+                note=f"{slot} 精筛已完成 {finished_count}/{len(candidate_pairs)} 个候选主题",
+            )
+            _emit_progress(
+                progress_callback,
+                event="slot_progress",
+                target=target_token,
+                slot=slot,
+                stage="targeted",
+                completed=finished_count,
+                total=len(candidate_pairs),
+                batch_id=str(pair["batch_id"]),
+                theme=str(pair["matched_theme"]),
+            )
 
     return [cached[str(pair["batch_theme_key"])] for pair in candidate_pairs if str(pair["batch_theme_key"]) in cached]
 
@@ -1119,6 +1542,8 @@ def _flatten_targeted_rows(slot_rows: list[dict[str, Any]], fragment_map: dict[s
                 "slot": slot,
                 "model": model,
                 "batch_id": batch_id,
+                "needs_manual_review": bool(row.get("needs_manual_review")) or str(piece_result.get("reason") or "") == MANUAL_REVIEW_REQUIRED_REASON,
+                "manual_review_reason": str(row.get("manual_review_reason") or "").strip(),
             }
     return flattened
 
@@ -1138,6 +1563,11 @@ def _build_consensus_and_disputes(
         if left is None or right is None:
             continue
         if bool(left["is_relevant"]) and bool(right["is_relevant"]):
+            manual_review_reasons = [
+                str(item.get("manual_review_reason") or "").strip()
+                for item in (left, right)
+                if bool(item.get("needs_manual_review"))
+            ]
             consensus.append(
                 {
                     "piece_id": left["piece_id"],
@@ -1146,17 +1576,21 @@ def _build_consensus_and_disputes(
                     "original_text": left["original_text"],
                     "note": f"llm1: {left['reason']} | llm2: {right['reason']}",
                     "judgment": "consensus",
+                    "needs_manual_review": bool(left.get("needs_manual_review")) or bool(right.get("needs_manual_review")),
+                    "manual_review_reason": " | ".join(item for item in manual_review_reasons if item),
                     "llm1_result": {
                         "is_relevant": left["is_relevant"],
                         "reason": left["reason"],
                         "model": left["model"],
                         "batch_id": left["batch_id"],
+                        "needs_manual_review": bool(left.get("needs_manual_review")),
                     },
                     "llm2_result": {
                         "is_relevant": right["is_relevant"],
                         "reason": right["reason"],
                         "model": right["model"],
                         "batch_id": right["batch_id"],
+                        "needs_manual_review": bool(right.get("needs_manual_review")),
                     },
                 }
             )
@@ -1176,12 +1610,14 @@ def _build_consensus_and_disputes(
                     "reason": left["reason"],
                     "model": left["model"],
                     "batch_id": left["batch_id"],
+                    "needs_manual_review": bool(left.get("needs_manual_review")),
                 },
                 "llm2_result": {
                     "is_relevant": right["is_relevant"],
                     "reason": right["reason"],
                     "model": right["model"],
                     "batch_id": right["batch_id"],
+                    "needs_manual_review": bool(right.get("needs_manual_review")),
                 },
             }
         )
@@ -1193,6 +1629,7 @@ def _run_arbitration(
     *,
     client: OpenAICompatClient,
     disputes_path: Path,
+    fragment_map: dict[str, Fragment],
     output_path: Path,
     workers: int,
     project_dir: Path,
@@ -1234,41 +1671,48 @@ def _run_arbitration(
             ),
         )
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            pending = {
-                executor.submit(_arbitrate_dispute, client=client, dispute=dispute): dispute
-                for dispute in pending_disputes
-            }
             resolved_count = len(cached)
-            while pending:
-                done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
-                for future in done:
-                    dispute = pending.pop(future)
-                    row = future.result()
-                    append_jsonl(output_path, row)
-                    cached[dispute["dispute_key"]] = row
-                    resolved_count += 1
-                    _update_target_state(
-                        target_dir,
-                        phase="arbitration",
-                        dispute_count=len(disputes),
-                        llm3_completed_disputes=resolved_count,
-                    )
-                    update_stage2_session_checkpoint(
-                        project_dir,
-                        action="checkpoint",
-                        target=target_token,
-                        cursor=f"llm3:dispute={resolved_count}/{len(disputes)}",
-                        piece_id=dispute["piece_id"],
-                        note=f"llm3 已仲裁 {resolved_count}/{len(disputes)} 条争议",
-                    )
-                    _emit_progress(
-                        progress_callback,
-                        event="arbitration_progress",
-                        target=target_token,
-                        completed=resolved_count,
-                        total=len(disputes),
-                        piece_id=dispute["piece_id"],
-                    )
+            for dispute, future in _iter_windowed_futures(
+                executor=executor,
+                items=pending_disputes,
+                max_in_flight=effective_workers,
+                submit_job=lambda item: executor.submit(_arbitrate_dispute, client=client, dispute=item),
+                on_wait=lambda in_flight: _emit_progress(
+                    progress_callback,
+                    event="arbitration_waiting",
+                    target=target_token,
+                    completed=resolved_count,
+                    total=len(disputes),
+                    in_flight=in_flight,
+                ),
+            ):
+                row = future.result()
+                append_jsonl(output_path, row)
+                _append_manual_review_entries(target_dir, row, fragment_map)
+                cached[dispute["dispute_key"]] = row
+                resolved_count += 1
+                _update_target_state(
+                    target_dir,
+                    phase="arbitration",
+                    dispute_count=len(disputes),
+                    llm3_completed_disputes=resolved_count,
+                )
+                update_stage2_session_checkpoint(
+                    project_dir,
+                    action="checkpoint",
+                    target=target_token,
+                    cursor=f"llm3:dispute={resolved_count}/{len(disputes)}",
+                    piece_id=dispute["piece_id"],
+                    note=f"llm3 已仲裁 {resolved_count}/{len(disputes)} 条争议",
+                )
+                _emit_progress(
+                    progress_callback,
+                    event="arbitration_progress",
+                    target=target_token,
+                    completed=resolved_count,
+                    total=len(disputes),
+                    piece_id=dispute["piece_id"],
+                )
     return [cached[dispute["dispute_key"]] for dispute in disputes if dispute["dispute_key"] in cached]
 
 
@@ -1288,6 +1732,8 @@ def _build_final_records(
             "original_text": record["original_text"],
             "note": record["note"],
             "judgment": "consensus",
+            "needs_manual_review": bool(record.get("needs_manual_review")),
+            "manual_review_reason": str(record.get("manual_review_reason") or "").strip(),
         }
     for arbitration in arbitration_rows:
         decision = arbitration.get("decision") or {}
@@ -1308,6 +1754,8 @@ def _build_final_records(
                 f"llm3: {decision.get('reason')}"
             ),
             "judgment": "arbitrated",
+            "needs_manual_review": bool(arbitration.get("needs_manual_review")),
+            "manual_review_reason": str(arbitration.get("manual_review_reason") or "").strip(),
         }
     return sorted(final_map.values(), key=lambda item: (item["piece_id"], item["matched_theme"]))
 
@@ -1323,6 +1771,8 @@ def _primary_corpus_payload(records: list[dict[str, Any]]) -> dict[str, Any]:
                 "matched_theme": record["matched_theme"],
                 "original_text": record["original_text"],
                 "note": record["note"],
+                "needs_manual_review": bool(record.get("needs_manual_review")),
+                "manual_review_reason": str(record.get("manual_review_reason") or "").strip(),
             }
             for record in records
         ],
@@ -1370,6 +1820,17 @@ def _clear_target_workspace(target_dir: Path) -> None:
 def _build_clients(*, dotenv_path: str | Path | None) -> dict[str, OpenAICompatClient]:
     clients: dict[str, OpenAICompatClient] = {}
     registry = RateControllerRegistry()
+    fallback_config = fallback_payload(dotenv_path=dotenv_path)
+    fallback_client: OpenAICompatClient | None = None
+    if fallback_config.get("enabled"):
+        fallback_client = OpenAICompatClient(
+            model=str(fallback_config["model"]),
+            base_url=str(fallback_config["base_url"]),
+            api_keys=tuple(str(key) for key in fallback_config["api_keys"] or () if str(key).strip()),
+            slot="fallback",
+            provider=str(fallback_config["provider"]),
+            rate_controller=None,
+        )
     for slot in ("llm1", "llm2", "llm3"):
         payload = slot_payload(slot, dotenv_path=dotenv_path)
         clients[slot] = OpenAICompatClient(
@@ -1377,7 +1838,10 @@ def _build_clients(*, dotenv_path: str | Path | None) -> dict[str, OpenAICompatC
             base_url=str(payload["base_url"]),
             api_keys=tuple(str(key) for key in payload["api_keys"] or () if str(key).strip()),
             slot=slot,
+            provider=str(payload["provider"]),
             rate_controller=registry.get(payload),
+            fallback_client=fallback_client,
+            fallback_max_retries=int(fallback_config.get("max_retries") or 0),
         )
     return clients
 
@@ -1526,6 +1990,7 @@ def run_stage2_pipeline(
                 client=clients["llm1"],
                 slot="llm1",
                 batches=batches,
+                fragment_map=fragment_map,
                 target_themes=target_themes,
                 output_path=_coarse_output_path(target_dir, "llm1"),
                 workers=llm1_workers,
@@ -1537,6 +2002,7 @@ def run_stage2_pipeline(
                 client=clients["llm2"],
                 slot="llm2",
                 batches=batches,
+                fragment_map=fragment_map,
                 target_themes=target_themes,
                 output_path=_coarse_output_path(target_dir, "llm2"),
                 workers=llm2_workers,
@@ -1612,6 +2078,7 @@ def run_stage2_pipeline(
             arbitration_rows = _run_arbitration(
                 client=clients["llm3"],
                 disputes_path=disputes_path,
+                fragment_map=fragment_map,
                 output_path=_arbitration_path(target_dir),
                 workers=llm3_workers,
                 project_dir=project_path,
@@ -1625,6 +2092,7 @@ def run_stage2_pipeline(
                 dispute_map=dispute_map,
             )
             write_jsonl(_final_path(target_dir), final_records)
+            manual_review_rows = read_jsonl(_manual_review_path(target_dir))
 
             summary = {
                 "target": target.token,
@@ -1639,6 +2107,8 @@ def run_stage2_pipeline(
                 ),
                 "final_record_count": len(final_records),
                 "final_piece_count": len({item["piece_id"] for item in final_records}),
+                "manual_review_count": len(manual_review_rows),
+                "manual_review_report_path": str(_manual_review_report_path(target_dir)) if manual_review_rows else "",
                 "updated_at": _now_iso(),
             }
             write_json(_summary_path(target_dir), summary)
