@@ -1,4 +1,4 @@
-"""提供阶段二外部入口，负责确认调研范围并写入 manifest / session。"""
+"""提供阶段二外部入口，负责确认调研范围并写入 stage2 manifest。"""
 
 from __future__ import annotations
 
@@ -17,18 +17,17 @@ if __package__ in {None, ""}:
     from runtime.stage2.runner import run_stage2_pipeline
     from runtime.stage2.session import (
         Stage2Context,
-        analysis_targets_from_session,
+        analysis_targets_from_manifest,
         build_stage2_timing_estimate,
         build_stage2_manifest,
         ensure_stage2_workspace,
         load_stage2_context,
-        load_stage2_session,
-        save_stage2_session,
+        load_stage2_manifest,
+        manifest_path,
         slot_summaries,
-        stage2_session_path,
         stage2_workspace_dir,
         summarize_retrieval_progress,
-        update_stage2_session_checkpoint,
+        update_stage2_manifest_checkpoint,
         write_stage2_manifest,
     )
 else:
@@ -37,18 +36,17 @@ else:
     from .runner import run_stage2_pipeline
     from .session import (
         Stage2Context,
-        analysis_targets_from_session,
+        analysis_targets_from_manifest,
         build_stage2_timing_estimate,
         build_stage2_manifest,
         ensure_stage2_workspace,
         load_stage2_context,
-        load_stage2_session,
-        save_stage2_session,
+        load_stage2_manifest,
+        manifest_path,
         slot_summaries,
-        stage2_session_path,
         stage2_workspace_dir,
         summarize_retrieval_progress,
-        update_stage2_session_checkpoint,
+        update_stage2_manifest_checkpoint,
         write_stage2_manifest,
     )
 
@@ -131,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint-action",
         choices=("start", "checkpoint", "pause", "complete", "reset"),
-        help="直接更新 outputs/<project>/_stage2/session.json 中的检索断点，不重新进入配置流程。",
+        help="直接更新 outputs/<project>/_stage2/2_stage2_manifest.json 中的检索断点，不重新进入配置流程。",
     )
     parser.add_argument("--checkpoint-target", help="断点操作对应的当前检索目标，如 KR1a 或 KR1a0157。")
     parser.add_argument("--checkpoint-cursor", help="当前检索游标或批次标记。")
@@ -220,7 +218,7 @@ def _resolve_project(outputs_root: Path, project_name: str) -> tuple[Path, Stage
 def _resolved_env_file(raw_env_file: str | None) -> str:
     if raw_env_file:
         return raw_env_file
-    return str(WORKSPACE_ROOT / DEFAULT_ENV_FILE)
+    return str(Path.cwd() / DEFAULT_ENV_FILE)
 
 
 def _resolve_runtime_path(raw_value: str, *, default_relative: str) -> Path:
@@ -359,16 +357,16 @@ def _prompt_analysis_targets(
         default_value = " ".join(selection.analysis_targets)
 
 
-def _session_snapshot_payload(project_dir: Path, session_data: dict[str, Any]) -> dict[str, Any]:
-    progress = session_data.get("retrieval_progress")
+def _manifest_snapshot_payload(project_dir: Path, manifest_data: dict[str, Any]) -> dict[str, Any]:
+    progress = manifest_data.get("retrieval_progress")
     return {
         "project_name": project_dir.name,
         "project_dir": str(project_dir),
         "stage2_workspace_dir": str(stage2_workspace_dir(project_dir)),
-        "analysis_targets": analysis_targets_from_session(session_data),
+        "analysis_targets": analysis_targets_from_manifest(manifest_data),
         "retrieval_progress": progress or {},
         "summary": summarize_retrieval_progress(progress),
-        "session_path": str(stage2_session_path(project_dir)),
+        "manifest_path": str(manifest_path(project_dir)),
     }
 
 
@@ -380,10 +378,10 @@ def _handle_checkpoint_command(args: argparse.Namespace, outputs_root: Path) -> 
     ensure_stage2_workspace(project_dir)
 
     if args.show_checkpoint:
-        payload = _session_snapshot_payload(project_dir, load_stage2_session(project_dir))
+        payload = _manifest_snapshot_payload(project_dir, load_stage2_manifest(project_dir))
     else:
         try:
-            session_data = update_stage2_session_checkpoint(
+            manifest_data = update_stage2_manifest_checkpoint(
                 project_dir,
                 action=str(args.checkpoint_action),
                 target=args.checkpoint_target,
@@ -394,7 +392,7 @@ def _handle_checkpoint_command(args: argparse.Namespace, outputs_root: Path) -> 
             )
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
-        payload = _session_snapshot_payload(project_dir, session_data)
+        payload = _manifest_snapshot_payload(project_dir, manifest_data)
 
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -405,55 +403,18 @@ def _handle_checkpoint_command(args: argparse.Namespace, outputs_root: Path) -> 
     print(payload["summary"])
     if payload["analysis_targets"]:
         print(f"analysis_targets: {', '.join(payload['analysis_targets'])}")
-    print(f"会话文件: {payload['session_path']}")
+    print(f"manifest 文件: {payload['manifest_path']}")
     return 0
-
-
-def _build_session_payload(
-    *,
-    project_dir: Path,
-    stage2_context: Stage2Context,
-    kanripo_root: Path,
-    analysis_targets: list[str],
-    manifest_output_path: Path | None,
-) -> dict[str, Any]:
-    return {
-        "session_version": 2,
-        "status": "configured",
-        "project_name": project_dir.name,
-        "project_dir": str(project_dir),
-        "stage2_workspace_dir": str(stage2_workspace_dir(project_dir)),
-        "manifest_path": str(manifest_output_path) if manifest_output_path else "",
-        "workspace_manifest_path": str(manifest_output_path) if manifest_output_path else "",
-        "proposal_path": str(stage2_context.proposal_path),
-        "journal_path": str(stage2_context.journal_path) if stage2_context.journal_path else "",
-        "research_question": stage2_context.research_question,
-        "idea": stage2_context.idea,
-        "theme_source": "stage1_proposal",
-        "retrieval_theme_source": stage2_context.retrieval_theme_source,
-        "retrieval_themes": [
-            {"theme": item.theme, "description": item.description}
-            for item in stage2_context.retrieval_themes
-        ],
-        "target_themes": [
-            {"theme": item.theme, "description": item.description}
-            for item in stage2_context.target_themes
-        ],
-        "kanripo_root": str(kanripo_root),
-        "analysis_targets": analysis_targets,
-    }
 
 
 def _emit_summary(
     manifest: dict[str, Any],
     *,
     manifest_output_path: Path | None,
-    session_output_path: Path | None,
     as_json: bool,
 ) -> None:
     payload = dict(manifest)
     payload["manifest_path"] = str(manifest_output_path) if manifest_output_path else ""
-    payload["session_path"] = str(session_output_path) if session_output_path else ""
 
     if as_json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -469,8 +430,6 @@ def _emit_summary(
     )
     _print_timing_estimate(payload.get("timing_estimate"))
     print(f"阶段二工作目录: {payload['stage2_workspace_dir']}")
-    if session_output_path:
-        print(f"会话文件: {session_output_path}")
     if manifest_output_path:
         print(f"manifest 已写入: {manifest_output_path}")
     else:
@@ -622,11 +581,11 @@ def main() -> int:
     project_dir, stage2_context = _resolve_project(outputs_root, project_name)
     ensure_stage2_workspace(project_dir)
 
-    resumed_session = load_stage2_session(project_dir)
-    if resumed_session:
+    resumed_manifest = load_stage2_manifest(project_dir)
+    if resumed_manifest and not args.json:
         print()
-        print(f"检测到已有阶段二会话: {stage2_session_path(project_dir)}")
-        print(summarize_retrieval_progress(resumed_session.get("retrieval_progress")))
+        print(f"检测到已有阶段二状态: {manifest_path(project_dir)}")
+        print(summarize_retrieval_progress(resumed_manifest.get("retrieval_progress")))
 
     kanripo_root = _resolve_runtime_path(args.kanripo_root, default_relative=DEFAULT_KANRIPO_ROOT)
     if not kanripo_root.exists():
@@ -659,7 +618,7 @@ def main() -> int:
     else:
         analysis_targets, corpus_overview, timing_estimate = _prompt_analysis_targets(
             kanripo_root,
-            default_targets=analysis_targets_from_session(resumed_session),
+            default_targets=analysis_targets_from_manifest(resumed_manifest),
             theme_count=theme_count,
             model_slots=model_slots,
         )
@@ -678,19 +637,8 @@ def main() -> int:
     )
 
     manifest_output_path: Path | None = None
-    session_output_path: Path | None = None
     if not args.no_write:
         manifest_output_path = write_stage2_manifest(project_dir, manifest)
-        session_output_path = save_stage2_session(
-            project_dir,
-            _build_session_payload(
-                project_dir=project_dir,
-                stage2_context=stage2_context,
-                kanripo_root=kanripo_root,
-                analysis_targets=analysis_targets,
-                manifest_output_path=manifest_output_path,
-            ),
-        )
 
     should_run = _should_run_stage2(args)
 
@@ -698,7 +646,6 @@ def main() -> int:
         _emit_summary(
             manifest,
             manifest_output_path=manifest_output_path,
-            session_output_path=session_output_path,
             as_json=args.json,
         )
     if should_run:

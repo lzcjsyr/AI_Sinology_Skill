@@ -1,4 +1,4 @@
-"""管理阶段二原始文献运行时的会话、工作目录、manifest 和检索断点状态。"""
+"""管理阶段二原始文献运行时的工作目录、manifest 和检索断点状态。"""
 
 from __future__ import annotations
 
@@ -15,8 +15,7 @@ from .catalog import normalize_scope
 
 STAGE2_MANIFEST_FILE = "2_stage2_manifest.json"
 STAGE2_WORKSPACE_DIR = "_stage2"
-STAGE2_WORKSPACE_MANIFEST_FILE = STAGE2_MANIFEST_FILE
-STAGE2_SESSION_FILE = "session.json"
+LEGACY_STAGE2_SESSION_FILE = "session.json"
 RETRIEVAL_PROGRESS_VERSION = 1
 STAGE2_ESTIMATED_REQUEST_SECONDS = 20
 
@@ -400,8 +399,8 @@ def build_stage2_timing_estimate(
     }
 
 
-def analysis_targets_from_session(session_payload: dict[str, Any]) -> list[str]:
-    return normalize_analysis_targets(_as_string_list(session_payload.get("analysis_targets")))
+def analysis_targets_from_manifest(manifest_payload: dict[str, Any]) -> list[str]:
+    return normalize_analysis_targets(_as_string_list(manifest_payload.get("analysis_targets")))
 
 
 def reconcile_retrieval_progress(
@@ -449,16 +448,18 @@ def reconcile_retrieval_progress(
     }
 
 
-def normalize_stage2_session(payload: dict[str, Any]) -> dict[str, Any]:
-    content = dict(payload)
-    analysis_targets = normalize_analysis_targets(_as_string_list(content.get("analysis_targets")))
-    raw_progress = content.get("retrieval_progress")
+def normalize_stage2_manifest(payload: dict[str, Any]) -> dict[str, Any]:
+    analysis_targets = normalize_analysis_targets(_as_string_list(payload.get("analysis_targets")))
+    raw_progress = payload.get("retrieval_progress")
+    status = str(payload.get("status") or "").strip() or "configured"
 
+    content = dict(payload)
+    content["stage2_manifest_version"] = 2
+    content["status"] = status
     if analysis_targets:
         content["analysis_targets"] = analysis_targets
     else:
         content.pop("analysis_targets", None)
-
     if analysis_targets or isinstance(raw_progress, dict):
         content["retrieval_progress"] = reconcile_retrieval_progress(
             analysis_targets,
@@ -466,7 +467,14 @@ def normalize_stage2_session(payload: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         content.pop("retrieval_progress", None)
-
+    content.pop("stage2_session_path", None)
+    content.pop("stage2_workspace_manifest_path", None)
+    for key in ("last_run_note", "last_run_at", "updated_at"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            content[key] = value
+        else:
+            content.pop(key, None)
     return content
 
 
@@ -575,7 +583,7 @@ def summarize_retrieval_progress(progress: dict[str, Any] | None) -> str:
     )
 
 
-def update_stage2_session_checkpoint(
+def update_stage2_manifest_checkpoint(
     project_dir: str | Path,
     *,
     action: str,
@@ -585,11 +593,11 @@ def update_stage2_session_checkpoint(
     note: str | None = None,
     completed_piece_delta: int = 0,
 ) -> dict[str, Any]:
-    session_payload = load_stage2_session(project_dir)
-    analysis_targets = analysis_targets_from_session(session_payload)
-    session_payload["retrieval_progress"] = update_retrieval_progress(
+    manifest_payload = load_stage2_manifest(project_dir)
+    analysis_targets = analysis_targets_from_manifest(manifest_payload)
+    manifest_payload["retrieval_progress"] = update_retrieval_progress(
         analysis_targets,
-        progress=session_payload.get("retrieval_progress"),
+        progress=manifest_payload.get("retrieval_progress"),
         action=action,
         target=target,
         cursor=cursor,
@@ -597,8 +605,8 @@ def update_stage2_session_checkpoint(
         note=note,
         completed_piece_delta=completed_piece_delta,
     )
-    save_stage2_session(project_dir, session_payload)
-    return session_payload
+    write_stage2_manifest(project_dir, manifest_payload)
+    return manifest_payload
 
 
 def stage2_workspace_dir(project_dir: str | Path) -> Path:
@@ -611,32 +619,32 @@ def ensure_stage2_workspace(project_dir: str | Path) -> Path:
     return path
 
 
-def stage2_workspace_manifest_path(project_dir: str | Path) -> Path:
-    return stage2_workspace_dir(project_dir) / STAGE2_WORKSPACE_MANIFEST_FILE
+def _legacy_session_path(project_dir: str | Path) -> Path:
+    return stage2_workspace_dir(project_dir) / LEGACY_STAGE2_SESSION_FILE
 
 
-def stage2_session_path(project_dir: str | Path) -> Path:
-    return stage2_workspace_dir(project_dir) / STAGE2_SESSION_FILE
-
-
-def load_stage2_session(project_dir: str | Path) -> dict[str, Any]:
-    path = stage2_session_path(project_dir)
+def _read_json_payload(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {}
-    return normalize_stage2_session(payload) if isinstance(payload, dict) else {}
+    return payload if isinstance(payload, dict) else {}
 
 
-def save_stage2_session(project_dir: str | Path, payload: dict[str, Any]) -> Path:
-    ensure_stage2_workspace(project_dir)
-    path = stage2_session_path(project_dir)
-    content = normalize_stage2_session(payload)
-    content["updated_at"] = _now_iso()
-    path.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return path
+def load_stage2_manifest(project_dir: str | Path) -> dict[str, Any]:
+    payload = _read_json_payload(manifest_path(project_dir))
+    legacy_payload: dict[str, Any] = {}
+    if "status" not in payload and "retrieval_progress" not in payload:
+        legacy_payload = _read_json_payload(_legacy_session_path(project_dir))
+        if legacy_payload:
+            for key in ("status", "analysis_targets", "retrieval_progress", "last_run_note", "last_run_at", "updated_at"):
+                if key not in payload and key in legacy_payload:
+                    payload[key] = legacy_payload[key]
+    if not payload and not legacy_payload:
+        return {}
+    return normalize_stage2_manifest(payload)
 
 
 def build_stage2_manifest(
@@ -674,8 +682,7 @@ def build_stage2_manifest(
         "project_name": project_name,
         "project_dir": str(project_dir),
         "stage2_workspace_dir": str(stage2_dir),
-        "stage2_session_path": str(stage2_session_path(project_dir)),
-        "stage2_workspace_manifest_path": str(stage2_workspace_manifest_path(project_dir)),
+        "stage2_manifest_path": str(manifest_path(project_dir)),
         "proposal_path": str(stage2_context.proposal_path),
         "journal_path": str(stage2_context.journal_path) if stage2_context.journal_path else "",
         "research_question": stage2_context.research_question,
@@ -701,6 +708,8 @@ def build_stage2_manifest(
         "corpus_overview": corpus_overview,
         "model_slots": resolved_model_slots,
         "timing_estimate": resolved_timing_estimate,
+        "status": "configured",
+        "retrieval_progress": reconcile_retrieval_progress(analysis_targets),
     }
 
 
@@ -711,6 +720,10 @@ def manifest_path(project_dir: str | Path) -> Path:
 def write_stage2_manifest(project_dir: str | Path, payload: dict[str, Any]) -> Path:
     ensure_stage2_workspace(project_dir)
     path = manifest_path(project_dir)
-    content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    content_payload = normalize_stage2_manifest(payload)
+    content_payload["updated_at"] = _now_iso()
+    if "stage2_manifest_path" not in content_payload:
+        content_payload["stage2_manifest_path"] = str(path)
+    content = json.dumps(content_payload, ensure_ascii=False, indent=2) + "\n"
     path.write_text(content, encoding="utf-8")
     return path

@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import Mock
 from unittest.mock import patch
 
-from runtime.stage2.api_config import screening_batch_char_limit
+from runtime.stage2.api_config import screening_batch_char_limit, slot_worker_limit
 from runtime.stage2.cli import WORKSPACE_ROOT, _emit_summary, _resolve_runtime_path, main
 from runtime.stage2.runner import Fragment, Stage2FormatError, _build_batches, run_stage2_pipeline
 
@@ -208,7 +208,6 @@ class Stage2CliTests(unittest.TestCase):
             _emit_summary(
                 manifest,
                 manifest_output_path=None,
-                session_output_path=None,
                 as_json=False,
             )
 
@@ -405,7 +404,7 @@ class Stage2CliTests(unittest.TestCase):
         self.assertIn("timing_estimate", payload)
         self.assertEqual(payload["timing_estimate"]["theme_count"], 2)
         self.assertTrue(all(slot["has_api_key"] for slot in payload["model_slots"]))
-        self.assertEqual(payload["model_slots"][0]["max_concurrency"], 24)
+        self.assertEqual(payload["model_slots"][0]["max_concurrency"], slot_worker_limit("llm1"))
 
     def test_cli_run_executes_dual_screening_and_arbitration(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -470,15 +469,15 @@ class Stage2CliTests(unittest.TestCase):
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "fragments.jsonl").exists())
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm1_coarse_screening.jsonl").exists())
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm2_coarse_screening.jsonl").exists())
-            self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "candidate_batch_theme_pairs.jsonl").exists())
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm1_screening.jsonl").exists())
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm2_screening.jsonl").exists())
+            self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "run_state.json").exists())
             disputes_text = (project_dir / "_stage2" / "targets" / "KR4c0001" / "disputes.jsonl").read_text(encoding="utf-8")
             self.assertIn("KR4c0001_000-1b::唐宋冬雷题咏", disputes_text)
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm3_arbitration.jsonl").exists())
-            session_text = (project_dir / "_stage2" / "session.json").read_text(encoding="utf-8")
-            self.assertIn('"status": "completed"', session_text)
-            self.assertIn('"current_target": ""', session_text)
+            manifest_text = (project_dir / "_stage2" / "2_stage2_manifest.json").read_text(encoding="utf-8")
+            self.assertIn('"status": "completed"', manifest_text)
+            self.assertIn('"current_target": ""', manifest_text)
             self.assertIn("[stage2] 开始执行", stdout.getvalue())
             self.assertIn("[stage2] KR4c0001 llm1 粗筛进度", stdout.getvalue())
             self.assertIn("[stage2] KR4c0001 候选主题就绪", stdout.getvalue())

@@ -26,13 +26,12 @@ from .catalog import (
 from .io_utils import append_jsonl, read_json, read_jsonl, write_json, write_jsonl, write_yaml
 from .rate_control import RateControllerRegistry, SlotRateController, estimate_request_tokens
 from .session import (
-    analysis_targets_from_session,
-    load_stage2_session,
+    analysis_targets_from_manifest,
+    load_stage2_manifest,
     manifest_path,
-    save_stage2_session,
-    stage2_session_path,
     stage2_workspace_dir,
-    update_stage2_session_checkpoint,
+    update_stage2_manifest_checkpoint,
+    write_stage2_manifest,
 )
 
 
@@ -48,12 +47,10 @@ LLM1_COARSE_FILE_NAME = "llm1_coarse_screening.jsonl"
 LLM2_COARSE_FILE_NAME = "llm2_coarse_screening.jsonl"
 LLM1_FILE_NAME = "llm1_screening.jsonl"
 LLM2_FILE_NAME = "llm2_screening.jsonl"
-CANDIDATE_PAIRS_FILE_NAME = "candidate_batch_theme_pairs.jsonl"
 CONSENSUS_FILE_NAME = "consensus_records.json"
 DISPUTES_FILE_NAME = "disputes.jsonl"
 ARBITRATION_FILE_NAME = "llm3_arbitration.jsonl"
 FINAL_FILE_NAME = "final_records.jsonl"
-SUMMARY_FILE_NAME = "target_summary.json"
 MANUAL_REVIEW_FILE_NAME = "manual_review_queue.jsonl"
 MANUAL_REVIEW_REPORT_FILE_NAME = "MANUAL_REVIEW_REQUIRED.md"
 TARGETS_DIR_NAME = "targets"
@@ -1088,10 +1085,6 @@ def _slot_output_path(target_dir: Path, slot: str) -> Path:
     return target_dir / (LLM1_FILE_NAME if slot == "llm1" else LLM2_FILE_NAME)
 
 
-def _candidate_pairs_path(target_dir: Path) -> Path:
-    return target_dir / CANDIDATE_PAIRS_FILE_NAME
-
-
 def _consensus_path(target_dir: Path) -> Path:
     return target_dir / CONSENSUS_FILE_NAME
 
@@ -1106,10 +1099,6 @@ def _arbitration_path(target_dir: Path) -> Path:
 
 def _final_path(target_dir: Path) -> Path:
     return target_dir / FINAL_FILE_NAME
-
-
-def _summary_path(target_dir: Path) -> Path:
-    return target_dir / SUMMARY_FILE_NAME
 
 
 def _manual_review_path(target_dir: Path) -> Path:
@@ -1251,10 +1240,6 @@ def _write_disputes(target_dir: Path, disputes: list[dict[str, Any]]) -> Path:
     return write_jsonl(_disputes_path(target_dir), disputes)
 
 
-def _write_candidate_pairs(target_dir: Path, pairs: list[dict[str, Any]]) -> Path:
-    return write_jsonl(_candidate_pairs_path(target_dir), pairs)
-
-
 def _load_disputes(path: Path) -> list[dict[str, Any]]:
     return read_jsonl(path)
 
@@ -1346,7 +1331,7 @@ def _run_coarse_batches(
                 batch_count=len(batches),
                 **{f"{slot}_completed_batches": finished_count},
             )
-            update_stage2_session_checkpoint(
+            update_stage2_manifest_checkpoint(
                 project_dir,
                 action="checkpoint",
                 target=target_token,
@@ -1495,7 +1480,7 @@ def _run_targeted_pairs(
                 candidate_pair_count=len(candidate_pairs),
                 **{f"{slot}_completed_pairs": finished_count},
             )
-            update_stage2_session_checkpoint(
+            update_stage2_manifest_checkpoint(
                 project_dir,
                 action="checkpoint",
                 target=target_token,
@@ -1697,7 +1682,7 @@ def _run_arbitration(
                     dispute_count=len(disputes),
                     llm3_completed_disputes=resolved_count,
                 )
-                update_stage2_session_checkpoint(
+                update_stage2_manifest_checkpoint(
                     project_dir,
                     action="checkpoint",
                     target=target_token,
@@ -1846,17 +1831,39 @@ def _build_clients(*, dotenv_path: str | Path | None) -> dict[str, OpenAICompatC
     return clients
 
 
-def _update_session_status(project_dir: Path, *, status: str, note: str = "") -> None:
-    session_payload = load_stage2_session(project_dir)
-    session_payload["status"] = status
+def _update_manifest_status(project_dir: Path, *, status: str, note: str = "") -> None:
+    manifest_payload = load_stage2_manifest(project_dir)
+    manifest_payload["status"] = status
     if note:
-        session_payload["last_run_note"] = note
-    session_payload["last_run_at"] = _now_iso()
-    save_stage2_session(project_dir, session_payload)
+        manifest_payload["last_run_note"] = note
+    manifest_payload["last_run_at"] = _now_iso()
+    write_stage2_manifest(project_dir, manifest_payload)
 
 
 def _load_existing_target_final_records(project_dir: Path, target_token: str) -> list[dict[str, Any]]:
     return read_jsonl(_final_path(_target_workspace_dir(project_dir, target_token)))
+
+
+def _target_summary_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    if not state or not bool(state.get("is_completed")):
+        return {}
+    keys = (
+        "target",
+        "repo_dir_count",
+        "fragment_count",
+        "batch_count",
+        "candidate_pair_count",
+        "consensus_count",
+        "dispute_count",
+        "arbitrated_keep_count",
+        "final_record_count",
+        "final_piece_count",
+        "manual_review_count",
+        "manual_review_report_path",
+        "updated_at",
+    )
+    summary = {key: state[key] for key in keys if key in state}
+    return summary if str(summary.get("target") or "").strip() else {}
 
 
 def run_stage2_pipeline(
@@ -1873,7 +1880,7 @@ def run_stage2_pipeline(
     project_path = Path(project_dir).expanduser().resolve()
     manifest = _load_manifest(project_path)
     selection = _selection_from_manifest(manifest)
-    session_before_run = load_stage2_session(project_path)
+    session_before_run = load_stage2_manifest(project_path)
     completed_targets_before_run = set(
         str(item) for item in ((session_before_run.get("retrieval_progress") or {}).get("completed_targets") or []) if str(item).strip()
     )
@@ -1885,13 +1892,13 @@ def run_stage2_pipeline(
         raise Stage2RunnerError(f"Kanripo 根目录不存在: {kanripo_root}")
 
     if force_rerun:
-        update_stage2_session_checkpoint(project_path, action="reset", note="force rerun")
+        update_stage2_manifest_checkpoint(project_path, action="reset", note="force rerun")
         completed_targets_before_run = set()
     clients = _build_clients(dotenv_path=dotenv_path)
     llm1_workers = max(1, int(llm1_workers if llm1_workers is not None else slot_worker_limit("llm1")))
     llm2_workers = max(1, int(llm2_workers if llm2_workers is not None else slot_worker_limit("llm2")))
     llm3_workers = max(1, int(llm3_workers if llm3_workers is not None else slot_worker_limit("llm3")))
-    _update_session_status(project_path, status="running", note="阶段二执行中")
+    _update_manifest_status(project_path, status="running", note="阶段二执行中")
     _emit_progress(
         progress_callback,
         event="pipeline_started",
@@ -1909,8 +1916,8 @@ def run_stage2_pipeline(
             if target.token in completed_targets_before_run and not force_rerun:
                 final_records = _load_existing_target_final_records(project_path, target.token)
                 if final_records:
-                    summary = read_json(_summary_path(target_dir), default={})
-                    if isinstance(summary, dict) and summary:
+                    summary = _target_summary_from_state(_load_target_state(target_dir))
+                    if summary:
                         summaries.append(summary)
                     merged_final_records.extend(final_records)
                     _emit_progress(
@@ -1920,10 +1927,10 @@ def run_stage2_pipeline(
                         final_record_count=len(final_records),
                     )
                     continue
-                update_stage2_session_checkpoint(project_path, action="reset", note="缓存缺失，重新构建阶段二")
+                update_stage2_manifest_checkpoint(project_path, action="reset", note="缓存缺失，重新构建阶段二")
                 completed_targets_before_run = set()
 
-            update_stage2_session_checkpoint(project_path, action="start", target=target.token, note="开始执行阶段二目标")
+            update_stage2_manifest_checkpoint(project_path, action="start", target=target.token, note="开始执行阶段二目标")
             existing_state = _load_target_state(target_dir)
             if existing_state and not force_rerun and not bool(existing_state.get("is_completed")):
                 _emit_progress(
@@ -2016,7 +2023,6 @@ def run_stage2_pipeline(
                 llm1_rows=llm1_coarse_rows,
                 llm2_rows=llm2_coarse_rows,
             )
-            _write_candidate_pairs(target_dir, candidate_pairs)
             _emit_progress(
                 progress_callback,
                 event="candidate_pairs_ready",
@@ -2111,16 +2117,11 @@ def run_stage2_pipeline(
                 "manual_review_report_path": str(_manual_review_report_path(target_dir)) if manual_review_rows else "",
                 "updated_at": _now_iso(),
             }
-            write_json(_summary_path(target_dir), summary)
             _update_target_state(
                 target_dir,
                 phase="completed",
                 is_completed=True,
-                final_record_count=summary["final_record_count"],
-                final_piece_count=summary["final_piece_count"],
-                candidate_pair_count=summary["candidate_pair_count"],
-                consensus_count=summary["consensus_count"],
-                dispute_count=summary["dispute_count"],
+                **summary,
                 llm1_completed_batches=len(llm1_coarse_rows),
                 llm2_completed_batches=len(llm2_coarse_rows),
                 llm1_completed_pairs=len(llm1_rows),
@@ -2136,7 +2137,7 @@ def run_stage2_pipeline(
                 final_record_count=len(final_records),
                 final_piece_count=len({item["piece_id"] for item in final_records}),
             )
-            update_stage2_session_checkpoint(
+            update_stage2_manifest_checkpoint(
                 project_path,
                 action="complete",
                 target=target.token,
@@ -2150,15 +2151,13 @@ def run_stage2_pipeline(
         summary_payload = {
             "project_name": project_path.name,
             "manifest_path": str(manifest_path(project_path)),
-            "session_path": str(stage2_session_path(project_path)),
-            "analysis_targets": analysis_targets_from_session(load_stage2_session(project_path)),
+            "analysis_targets": analysis_targets_from_manifest(load_stage2_manifest(project_path)),
             "piece_count": payload["piece_count"],
             "record_count": len(payload["records"]),
             "targets": summaries,
             "updated_at": _now_iso(),
         }
-        write_json(stage2_workspace_dir(project_path) / "run_summary.json", summary_payload)
-        _update_session_status(project_path, status="completed", note="阶段二执行完成")
+        _update_manifest_status(project_path, status="completed", note="阶段二执行完成")
         _emit_progress(
             progress_callback,
             event="pipeline_completed",
@@ -2168,8 +2167,8 @@ def run_stage2_pipeline(
         )
         return summary_payload
     except Exception as exc:  # noqa: BLE001
-        _update_session_status(project_path, status="paused", note=str(exc))
-        progress = (load_stage2_session(project_path).get("retrieval_progress") or {})
+        _update_manifest_status(project_path, status="paused", note=str(exc))
+        progress = (load_stage2_manifest(project_path).get("retrieval_progress") or {})
         current_target = str(progress.get("current_target") or "").strip()
         if current_target:
             _update_target_state(

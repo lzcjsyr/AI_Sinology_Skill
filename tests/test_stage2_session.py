@@ -10,13 +10,11 @@ from runtime.stage2.session import (
     ThemeItem,
     build_stage2_manifest,
     load_stage2_context,
-    load_stage2_session,
+    load_stage2_manifest,
+    manifest_path,
     reconcile_retrieval_progress,
-    save_stage2_session,
-    stage2_session_path,
-    stage2_workspace_manifest_path,
     update_retrieval_progress,
-    update_stage2_session_checkpoint,
+    update_stage2_manifest_checkpoint,
     write_stage2_manifest,
 )
 
@@ -181,8 +179,7 @@ class Stage2SessionTests(unittest.TestCase):
         self.assertEqual(len(manifest["model_slots"]), 3)
         self.assertEqual(manifest["timing_estimate"]["theme_count"], 2)
         self.assertGreaterEqual(manifest["timing_estimate"]["upper_bound_seconds"], manifest["timing_estimate"]["lower_bound_seconds"])
-        self.assertTrue(manifest["stage2_session_path"].endswith("/_stage2/session.json"))
-        self.assertTrue(manifest["stage2_workspace_manifest_path"].endswith("/_stage2/2_stage2_manifest.json"))
+        self.assertTrue(manifest["stage2_manifest_path"].endswith("/_stage2/2_stage2_manifest.json"))
 
     def test_build_stage2_manifest_does_not_leak_process_env_when_env_values_are_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -217,35 +214,27 @@ class Stage2SessionTests(unittest.TestCase):
         assert stage2_context is not None
         self.assertTrue(all(not slot["has_api_key"] for slot in manifest["model_slots"]))
 
-    def test_stage2_workspace_persists_session_and_manifest(self) -> None:
+    def test_stage2_workspace_persists_manifest_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "demo"
             project_dir.mkdir()
 
-            save_stage2_session(
-                project_dir,
-                {
-                    "status": "configured",
-                    "project_name": "demo",
-                    "analysis_targets": ["KR3j0160"],
-                },
-            )
             root_manifest = write_stage2_manifest(
                 project_dir,
                 {
                     "project_name": "demo",
+                    "status": "configured",
                     "analysis_targets": ["KR3j0160"],
                 },
             )
-            loaded_session = load_stage2_session(project_dir)
+            loaded_manifest = load_stage2_manifest(project_dir)
 
             self.assertTrue(root_manifest.exists())
-            self.assertTrue(stage2_workspace_manifest_path(project_dir).exists())
-            self.assertTrue(stage2_session_path(project_dir).exists())
-            self.assertEqual(root_manifest, stage2_workspace_manifest_path(project_dir))
-            self.assertEqual(loaded_session["status"], "configured")
-            self.assertEqual(loaded_session["analysis_targets"], ["KR3j0160"])
-            self.assertEqual(loaded_session["retrieval_progress"]["pending_targets"], ["KR3j0160"])
+            self.assertEqual(root_manifest, manifest_path(project_dir))
+            self.assertEqual(loaded_manifest["status"], "configured")
+            self.assertEqual(loaded_manifest["analysis_targets"], ["KR3j0160"])
+            self.assertEqual(loaded_manifest["retrieval_progress"]["pending_targets"], ["KR3j0160"])
+            self.assertEqual(loaded_manifest["project_name"], "demo")
 
     def test_reconcile_retrieval_progress_tracks_targets(self) -> None:
         progress = reconcile_retrieval_progress(
@@ -299,22 +288,21 @@ class Stage2SessionTests(unittest.TestCase):
         self.assertEqual(progress["completed_targets"], ["KR3j"])
         self.assertEqual(progress["pending_targets"], ["KR3j0160"])
 
-    def test_update_stage2_session_checkpoint_persists_resume_state(self) -> None:
+    def test_update_stage2_manifest_checkpoint_persists_resume_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir) / "demo"
             project_dir.mkdir()
 
-            save_stage2_session(
+            write_stage2_manifest(
                 project_dir,
                 {
                     "status": "configured",
-                    "project_name": "demo",
                     "analysis_targets": ["KR3j", "KR3j0160"],
                 },
             )
 
-            update_stage2_session_checkpoint(project_dir, action="start", target="KR3j0160")
-            update_stage2_session_checkpoint(
+            update_stage2_manifest_checkpoint(project_dir, action="start", target="KR3j0160")
+            update_stage2_manifest_checkpoint(
                 project_dir,
                 action="checkpoint",
                 cursor="offset=120",
@@ -323,14 +311,14 @@ class Stage2SessionTests(unittest.TestCase):
                 note="已检索到第 120 条",
             )
 
-            loaded_session = load_stage2_session(project_dir)
+            loaded_manifest = load_stage2_manifest(project_dir)
 
-        self.assertEqual(loaded_session["analysis_targets"], ["KR3j", "KR3j0160"])
-        self.assertEqual(loaded_session["retrieval_progress"]["current_target"], "KR3j0160")
-        self.assertEqual(loaded_session["retrieval_progress"]["current_cursor"], "offset=120")
-        self.assertEqual(loaded_session["retrieval_progress"]["last_piece_id"], "pb:KR3j0160_010-2b")
-        self.assertEqual(loaded_session["retrieval_progress"]["completed_piece_count"], 5)
-        self.assertEqual(loaded_session["retrieval_progress"]["notes"], "已检索到第 120 条")
+        self.assertEqual(loaded_manifest["analysis_targets"], ["KR3j", "KR3j0160"])
+        self.assertEqual(loaded_manifest["retrieval_progress"]["current_target"], "KR3j0160")
+        self.assertEqual(loaded_manifest["retrieval_progress"]["current_cursor"], "offset=120")
+        self.assertEqual(loaded_manifest["retrieval_progress"]["last_piece_id"], "pb:KR3j0160_010-2b")
+        self.assertEqual(loaded_manifest["retrieval_progress"]["completed_piece_count"], 5)
+        self.assertEqual(loaded_manifest["retrieval_progress"]["notes"], "已检索到第 120 条")
 
 
 if __name__ == "__main__":

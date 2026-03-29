@@ -7,7 +7,7 @@
 - `./.agent/skills/ai-sinology/`
   - 负责阶段一、三、四、五、六的写作性工作，以及项目初始化、进度同步、工作区契约和阶段三开放来源脚本。
 - `./runtime/stage2/`
-  - 负责阶段二的一手史料运行时：Kanripo scope 校验、正文规模统计、manifest/session 管理、双模型筛读、第三模型仲裁、断点续跑和 API/环境烟雾测试。
+  - 负责阶段二的一手史料运行时：Kanripo scope 校验、正文规模统计、manifest 状态管理、双模型筛读、第三模型仲裁、断点续跑和 API/环境烟雾测试。
 
 机器可读契约由 `./.agent/skills/ai-sinology/assets/workspace-contract.json` 维护。
 
@@ -17,7 +17,6 @@
 2. 完成阶段一，生成 `1_journal_targeting.md` 与 `1_research_proposal.md`；建议在 front matter 中显式写入 `stage2_retrieval_themes`
 3. 运行 `python3 -m runtime.stage2.cli`，从阶段一输入出发读取检索主题并确认阶段二原始文献检索范围，生成：
    - `outputs/<project>/_stage2/2_stage2_manifest.json`
-   - `outputs/<project>/_stage2/session.json`
 4. 运行阶段二 CLI，直接执行 Kanripo 原始文献勘查，并写回 `outputs/<project>/2_primary_corpus.yaml`
 5. 回到 Skill 内推进阶段三：
    - `3A` 生成 `3a_deepened_thinking.md`
@@ -56,7 +55,6 @@
 │       ├── 2_primary_corpus.yaml
 │       ├── _stage2/
 │       │   ├── 2_stage2_manifest.json
-│       │   ├── session.json
 │       ├── 3a_deepened_thinking.md
 │       ├── 3c_scholarship_map.yaml
 │       ├── _stage3b/
@@ -112,12 +110,12 @@ pytest
 - `retrieval_progress.last_piece_id`
 - `retrieval_progress.completed_piece_count`
 
-默认交互模式下，阶段二在确认 `analysis_targets` 后会直接开始执行；只有显式使用 `--setup-only` 时，才只写入 manifest/session 不进入筛读。执行阶段会进一步完成：
+默认交互模式下，阶段二在确认 `analysis_targets` 后会直接开始执行；只有显式使用 `--setup-only` 时，才只写入 manifest 状态文件、不进入筛读。执行阶段会进一步完成：
 
 - 解析 `analysis_targets` 对应的 Kanripo 正文分页，写入 `_stage2/targets/<target>/fragments.jsonl`
 - 按批次将正文送入 `llm1` 与 `llm2` 独立筛读，分别保存 `llm1_screening.jsonl` 与 `llm2_screening.jsonl`
 - 对双模型分歧样本调用 `llm3` 仲裁，保存 `llm3_arbitration.jsonl`
-- 为人工复核保留 `consensus_records.json`、`disputes.json`、`final_records.jsonl` 与 `target_summary.json`
+- 为人工复核保留 `consensus_records.json`、`disputes.json`、`final_records.jsonl`，并在 `run_state.json` 中维护目标级摘要
 - 成功后统一写回 `outputs/<project>/2_primary_corpus.yaml`
 
 如果用户不熟悉 `KR1a`、`KR2k`、`KR3j` 这类 Kanripo family，可先阅读 `runtime/stage2/docs/kanripo_family_guide.md`。
