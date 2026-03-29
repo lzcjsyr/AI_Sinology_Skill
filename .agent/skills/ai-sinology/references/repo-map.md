@@ -28,8 +28,7 @@
   - `./.agent/skills/ai-sinology/scripts/project_status.py`
 - 改阶段一写法：
   - `./.agent/skills/ai-sinology/references/stage1-planning.md`
-  - `./.agent/skills/ai-sinology/references/stage1-venues.md`
-  - `./.agent/skills/ai-sinology/references/` 下对应的单刊文件
+  - `./.agent/skills/ai-sinology/references/stage1_journals_intro.md`
 - 改阶段二写法：
   - `./.agent/skills/ai-sinology/references/stage2-primary-corpus.md`
 - 改阶段二运行时：

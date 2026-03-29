@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 from importlib.util import module_from_spec, spec_from_file_location
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
+import unicodedata
 
 if __package__ in {None, ""}:
     WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
@@ -62,6 +64,17 @@ WORKSPACE_CONTRACT_PATH = (
     / "workspace-contract.md"
 )
 
+_ANSI_CODES = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "cyan": "\033[36m",
+}
+
 
 def _load_workspace_contract_module():
     skill_script = (
@@ -89,6 +102,69 @@ def _load_workspace_contract_module():
 _WORKSPACE_CONTRACT_MODULE = _load_workspace_contract_module()
 inspect_project = _WORKSPACE_CONTRACT_MODULE.inspect_project
 list_projects = _WORKSPACE_CONTRACT_MODULE.list_projects
+
+
+def _supports_ansi(stream: Any) -> bool:
+    if os.getenv("NO_COLOR") is not None:
+        return False
+    if os.getenv("TERM", "").lower() == "dumb":
+        return False
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty and isatty())
+
+
+def _style(text: str, *styles: str, stream: Any = sys.stdout) -> str:
+    if not styles or not _supports_ansi(stream):
+        return text
+    prefix = "".join(_ANSI_CODES[name] for name in styles if name in _ANSI_CODES and name != "reset")
+    if not prefix:
+        return text
+    return f"{prefix}{text}{_ANSI_CODES['reset']}"
+
+
+def _section_title(title: str, *, stream: Any = sys.stdout) -> str:
+    return _style(f"== {title} ==", "bold", "cyan", stream=stream)
+
+
+def _label(label: str, *, stream: Any = sys.stdout) -> str:
+    return _style(label, "bold", stream=stream)
+
+
+def _muted(text: str, *, stream: Any = sys.stdout) -> str:
+    return _style(text, "dim", stream=stream)
+
+
+def _bullet(text: str, *, stream: Any = sys.stdout, tone: str = "cyan") -> str:
+    return f"  {_style('•', tone, stream=stream)} {text}"
+
+
+def _kv(label: str, value: object, *, stream: Any = sys.stdout, width: int = 14) -> str:
+    return f"{_label(label.ljust(width), stream=stream)} {value}"
+
+
+def _display_width(text: str) -> int:
+    width = 0
+    for char in text:
+        if unicodedata.combining(char):
+            continue
+        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
+    return width
+
+
+def _pad_display(text: str, width: int) -> str:
+    return text + (" " * max(0, width - _display_width(text)))
+
+
+def _render_box(title: str, lines: list[str]) -> str:
+    inner_width = max([_display_width(title), *(_display_width(line) for line in lines)], default=0)
+    rendered = [
+        f"┌{'─' * (inner_width + 2)}┐",
+        f"│ {_pad_display(title, inner_width)} │",
+        f"├{'─' * (inner_width + 2)}┤",
+    ]
+    rendered.extend(f"│ {_pad_display(line, inner_width)} │" for line in lines)
+    rendered.append(f"└{'─' * (inner_width + 2)}┘")
+    return "\n".join(rendered)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -179,14 +255,14 @@ def _pick_project(outputs_root: Path) -> str:
         raise SystemExit("outputs/ 下没有项目。请先通过 Skill 创建项目并完成阶段一产物。")
 
     print()
-    print("可用项目:")
+    print(_section_title("可用项目", stream=sys.stdout))
     for index, project_name in enumerate(projects, start=1):
         status = inspect_project(outputs_root, project_name)
-        print(
-            f"  {index}. {project_name}"
+        print(_bullet(
+            f"{index}. {project_name}"
             f" | 下一阶段={status.next_stage}"
             f" | 已完成到阶段={status.highest_completed_stage}"
-        )
+        , stream=sys.stdout))
 
     valid_indexes = {str(index): project for index, project in enumerate(projects, start=1)}
     while True:
@@ -231,31 +307,38 @@ def _resolve_runtime_path(raw_value: str, *, default_relative: str) -> Path:
 
 
 def _print_intro(project_dir: Path, stage2_context: Stage2Context, kanripo_root: Path) -> None:
+    stream = sys.stdout
     print()
-    print("阶段二将直接读取阶段一文件，不再要求额外 handoff。")
-    print("请先阅读 guide 或底层契约，确认本次要覆盖的 Kanripo 范围后，再输入 analysis_targets。")
-    print(f"guide: {STAGE2_GUIDE_PATH}")
-    print(f"底层契约: {WORKSPACE_CONTRACT_PATH}")
-    print(f"项目目录: {project_dir}")
-    print(f"Kanripo 根目录: {kanripo_root}")
-    print(f"研究问题: {stage2_context.research_question or '(未填写)'}")
+    print(_section_title("阶段二配置", stream=stream))
+    print(_muted("阶段二将直接读取阶段一文件，不再要求额外 handoff。", stream=stream))
+    print(_muted("请先阅读 guide 或底层契约，确认本次要覆盖的 Kanripo 范围后，再输入 analysis_targets。", stream=stream))
+    print(_kv("guide", STAGE2_GUIDE_PATH, stream=stream))
+    print(_kv("底层契约", WORKSPACE_CONTRACT_PATH, stream=stream))
+    print(_kv("项目目录", project_dir, stream=stream))
+    print(_kv("Kanripo 根目录", kanripo_root, stream=stream))
+    print(_kv("研究问题", stage2_context.research_question or "(未填写)", stream=stream))
     print(
-        "阶段一检索主题:"
-        if stage2_context.retrieval_theme_source == "stage1_frontmatter"
-        else "阶段一提炼主题:"
+        _label(
+            "阶段一检索主题:"
+            if stage2_context.retrieval_theme_source == "stage1_frontmatter"
+            else "阶段一提炼主题:",
+            stream=stream,
+        )
     )
     for item in stage2_context.retrieval_themes:
         if item.description:
-            print(f"  - {item.theme} | {item.description}")
+            print(_bullet(f"{item.theme} | {item.description}", stream=stream))
         else:
-            print(f"  - {item.theme}")
+            print(_bullet(item.theme, stream=stream))
 
 
 def _print_selection_errors(issues: tuple[Any, ...]) -> None:
+    stream = sys.stdout
     print()
-    print("输入有误，请修正以下目标后重新输入：")
+    print(_section_title("输入有误", stream=stream))
+    print(_muted("请修正以下目标后重新输入。", stream=stream))
     for issue in issues:
-        print(f"  - {issue.token}: {issue.detail}")
+        print(_bullet(f"{issue.token}: {issue.detail}", stream=stream, tone="red"))
 
 
 def _format_int(value: object) -> str:
@@ -295,7 +378,7 @@ def _format_duration(seconds: object) -> str:
 def _print_timing_estimate(timing_estimate: dict[str, Any] | None) -> None:
     if not timing_estimate:
         return
-    print(
+    line = (
         f"估时 | 主题 {_format_int(timing_estimate.get('theme_count', 0))}"
         f" | 片段 {_format_int(timing_estimate.get('fragment_count', 0))}"
         f" | 批次 {_format_int(timing_estimate.get('batch_count', 0))}"
@@ -303,25 +386,48 @@ def _print_timing_estimate(timing_estimate: dict[str, Any] | None) -> None:
         f" - {_format_duration(timing_estimate.get('upper_bound_seconds', 0))}"
         f"（按单次请求 {_format_int(timing_estimate.get('request_seconds', 0))} 秒）"
     )
+    print(_style(line, "yellow", stream=sys.stdout))
 
 
 def _print_corpus_overview(overview: Any, timing_estimate: dict[str, Any] | None = None) -> None:
-    print()
-    print("调研范围统计（正文字符数仅供预估工作量使用）:")
+    lines = ["正文字符数仅供预估工作量使用。", ""]
     for item in overview.targets:
         level_label = "类目" if item.level == "family" else "目录"
-        print(
-            f"  - {item.token} [{level_label}]"
-            f" | 目录 {_format_int(item.repo_dir_count)}"
-            f" | 文本 {_format_int(item.text_file_count)}"
-            f" | 正文约 {_format_int(item.text_char_count)} 字"
+        lines.extend(
+            [
+                f"{item.token} [{level_label}]",
+                f"  目录数      {_format_int(item.repo_dir_count)}",
+                f"  文本数      {_format_int(item.text_file_count)}",
+                f"  正文规模    {_format_int(item.text_char_count)} 字",
+                "",
+            ]
         )
-    print(
-        f"合计 | 目录 {_format_int(overview.repo_dir_count)}"
-        f" | 文本 {_format_int(overview.text_file_count)}"
-        f" | 正文约 {_format_int(overview.text_char_count)} 字"
+    lines.extend(
+        [
+            "合计",
+            f"  目录数      {_format_int(overview.repo_dir_count)}",
+            f"  文本数      {_format_int(overview.text_file_count)}",
+            f"  正文规模    {_format_int(overview.text_char_count)} 字",
+        ]
     )
-    _print_timing_estimate(timing_estimate)
+    if timing_estimate:
+        lines.extend(
+            [
+                "",
+                "估时",
+                f"  主题数      {_format_int(timing_estimate.get('theme_count', 0))}",
+                f"  片段数      {_format_int(timing_estimate.get('fragment_count', 0))}",
+                f"  批次数      {_format_int(timing_estimate.get('batch_count', 0))}",
+                (
+                    "  预估耗时    "
+                    f"{_format_duration(timing_estimate.get('lower_bound_seconds', 0))}"
+                    f" - {_format_duration(timing_estimate.get('upper_bound_seconds', 0))}"
+                ),
+                f"  单次请求    {_format_int(timing_estimate.get('request_seconds', 0))} 秒",
+            ]
+        )
+    print()
+    print(_render_box("调研范围统计", lines))
 
 
 def _prompt_analysis_targets(
@@ -399,11 +505,12 @@ def _handle_checkpoint_command(args: argparse.Namespace, outputs_root: Path) -> 
         return 0
 
     print()
-    print(f"项目: {payload['project_name']}")
+    print(_section_title("断点摘要", stream=sys.stdout))
+    print(_kv("项目", payload["project_name"], stream=sys.stdout))
     print(payload["summary"])
     if payload["analysis_targets"]:
-        print(f"analysis_targets: {', '.join(payload['analysis_targets'])}")
-    print(f"manifest 文件: {payload['manifest_path']}")
+        print(_kv("analysis_targets", ", ".join(payload["analysis_targets"]), stream=sys.stdout))
+    print(_kv("manifest 文件", payload["manifest_path"], stream=sys.stdout))
     return 0
 
 
@@ -420,20 +527,26 @@ def _emit_summary(
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
+    stream = sys.stdout
     print()
-    print(f"项目: {payload['project_name']}")
-    print(f"analysis_targets: {', '.join(payload['analysis_targets'])}")
+    print(_section_title("配置摘要", stream=stream))
+    print(_kv("项目", payload["project_name"], stream=stream))
+    print(_kv("analysis_targets", ", ".join(payload["analysis_targets"]), stream=stream))
     print(
-        f"预估正文规模: {_format_int(payload['corpus_overview']['text_char_count'])} 字"
-        f" | 文本 {_format_int(payload['corpus_overview']['text_file_count'])}"
-        f" | 目录 {_format_int(payload['corpus_overview']['repo_dir_count'])}"
+        _kv(
+            "预估正文规模",
+            f"{_format_int(payload['corpus_overview']['text_char_count'])} 字"
+            f" | 文本 {_format_int(payload['corpus_overview']['text_file_count'])}"
+            f" | 目录 {_format_int(payload['corpus_overview']['repo_dir_count'])}",
+            stream=stream,
+        )
     )
     _print_timing_estimate(payload.get("timing_estimate"))
-    print(f"阶段二工作目录: {payload['stage2_workspace_dir']}")
+    print(_kv("阶段二工作目录", payload["stage2_workspace_dir"], stream=stream))
     if manifest_output_path:
-        print(f"manifest 已写入: {manifest_output_path}")
+        print(_kv("manifest", f"已写入 {manifest_output_path}", stream=stream))
     else:
-        print("manifest 仅预览，未写入文件。")
+        print(_kv("manifest", "仅预览，未写入文件。", stream=stream))
 
 
 def _emit_run_summary(summary: dict[str, Any], *, as_json: bool) -> None:
@@ -441,25 +554,37 @@ def _emit_run_summary(summary: dict[str, Any], *, as_json: bool) -> None:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
 
+    stream = sys.stdout
     print()
-    print("阶段二执行完成:")
-    print(f"项目: {summary['project_name']}")
-    print(f"analysis_targets: {', '.join(summary['analysis_targets'])}")
-    print(f"最终保留: {summary['piece_count']} 个 piece_id / {summary['record_count']} 条记录")
+    print(_section_title("阶段二执行完成", stream=stream))
+    print(_kv("项目", summary["project_name"], stream=stream))
+    print(_kv("analysis_targets", ", ".join(summary["analysis_targets"]), stream=stream))
+    print(_kv("最终保留", f"{summary['piece_count']} 个 piece_id / {summary['record_count']} 条记录", stream=stream))
     for item in summary.get("targets") or []:
-        print(
-            f"  - {item['target']}"
+        print(_bullet(
+            f"{item['target']}"
             f" | fragments {item['fragment_count']}"
             f" | batches {item['batch_count']}"
             f" | candidate_pairs {item.get('candidate_pair_count', 0)}"
             f" | consensus {item['consensus_count']}"
             f" | disputes {item['dispute_count']}"
             f" | final {item['final_record_count']}"
-        )
+        , stream=stream, tone="green"))
 
 
 def _build_progress_printer(*, as_json: bool):
     stream = sys.stderr if as_json else sys.stdout
+    event_styles = {
+        "pipeline_started": ("bold", "cyan"),
+        "pipeline_completed": ("bold", "green"),
+        "pipeline_failed": ("bold", "red"),
+        "target_started": ("bold", "blue"),
+        "target_completed": ("green",),
+        "target_resumed": ("yellow",),
+        "target_reused": ("yellow",),
+        "slot_waiting": ("dim",),
+        "arbitration_waiting": ("dim",),
+    }
 
     def emit(event: dict[str, Any]) -> None:
         event_name = str(event.get("event") or "").strip()
@@ -549,7 +674,7 @@ def _build_progress_printer(*, as_json: bool):
         else:
             line = f"[stage2] {json.dumps(event, ensure_ascii=False)}"
 
-        print(line, file=stream, flush=True)
+        print(_style(line, *event_styles.get(event_name, ()), stream=stream), file=stream, flush=True)
 
     return emit
 
@@ -584,7 +709,8 @@ def main() -> int:
     resumed_manifest = load_stage2_manifest(project_dir)
     if resumed_manifest and not args.json:
         print()
-        print(f"检测到已有阶段二状态: {manifest_path(project_dir)}")
+        print(_section_title("续跑状态", stream=sys.stdout))
+        print(_kv("manifest", manifest_path(project_dir), stream=sys.stdout))
         print(summarize_retrieval_progress(resumed_manifest.get("retrieval_progress")))
 
     kanripo_root = _resolve_runtime_path(args.kanripo_root, default_relative=DEFAULT_KANRIPO_ROOT)

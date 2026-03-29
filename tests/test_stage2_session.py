@@ -8,6 +8,7 @@ from unittest.mock import patch
 from runtime.stage2.catalog import measure_corpus_overview, resolve_analysis_targets, split_target_tokens
 from runtime.stage2.session import (
     ThemeItem,
+    build_stage2_timing_estimate,
     build_stage2_manifest,
     load_stage2_context,
     load_stage2_manifest,
@@ -20,6 +21,31 @@ from runtime.stage2.session import (
 
 
 class Stage2SessionTests(unittest.TestCase):
+    def test_build_stage2_timing_estimate_uses_targeted_screening_ratios_without_arbitration(self) -> None:
+        timing = build_stage2_timing_estimate(
+            corpus_overview={
+                "targets": [
+                    {
+                        "token": "KR1a",
+                        "batch_count": 1000,
+                        "fragment_count": 2400,
+                    }
+                ]
+            },
+            theme_count=7,
+            model_slots=[
+                {"slot": "llm1", "max_concurrency": 10},
+                {"slot": "llm2", "max_concurrency": 10},
+                {"slot": "llm3", "max_concurrency": 10},
+            ],
+            request_seconds=20,
+        )
+
+        self.assertEqual(timing["targeted_batch_count_lower"], 10)
+        self.assertEqual(timing["targeted_batch_count_upper"], 50)
+        self.assertEqual(timing["lower_bound_seconds"], 4040)
+        self.assertEqual(timing["upper_bound_seconds"], 4200)
+
     def test_load_stage2_context_reads_stage1_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             project_dir = Path(tmpdir)

@@ -18,6 +18,8 @@ STAGE2_WORKSPACE_DIR = "_stage2"
 LEGACY_STAGE2_SESSION_FILE = "session.json"
 RETRIEVAL_PROGRESS_VERSION = 1
 STAGE2_ESTIMATED_REQUEST_SECONDS = 20
+STAGE2_TARGETED_LOWER_RATIO = 0.01
+STAGE2_TARGETED_UPPER_RATIO = 0.05
 
 
 @dataclass(frozen=True)
@@ -308,6 +310,16 @@ def _phase_seconds(*, request_count: int, workers: int, request_seconds: int) ->
     return math.ceil(safe_request_count / safe_workers) * max(1, int(request_seconds))
 
 
+def _estimated_targeted_request_count(*, batch_count: int, ratio: float) -> int:
+    safe_batch_count = max(0, int(batch_count))
+    if safe_batch_count == 0:
+        return 0
+    safe_ratio = max(0.0, float(ratio))
+    if safe_ratio <= 0:
+        return 0
+    return math.ceil(safe_batch_count * safe_ratio)
+
+
 def build_stage2_timing_estimate(
     *,
     corpus_overview: dict[str, Any],
@@ -316,15 +328,15 @@ def build_stage2_timing_estimate(
     request_seconds: int = STAGE2_ESTIMATED_REQUEST_SECONDS,
 ) -> dict[str, Any]:
     safe_theme_count = max(0, int(theme_count))
+    resolved_request_seconds = max(1, int(request_seconds))
     llm1_workers = _stage2_worker_limit(model_slots, "llm1")
     llm2_workers = _stage2_worker_limit(model_slots, "llm2")
-    llm3_workers = _stage2_worker_limit(model_slots, "llm3")
 
     target_estimates: list[dict[str, Any]] = []
     total_batch_count = 0
     total_fragment_count = 0
-    total_max_candidate_pair_count = 0
-    total_max_dispute_count = 0
+    total_targeted_batch_count_lower = 0
+    total_targeted_batch_count_upper = 0
     total_lower_bound_seconds = 0
     total_upper_bound_seconds = 0
 
@@ -341,28 +353,42 @@ def build_stage2_timing_estimate(
         item = raw_target if isinstance(raw_target, dict) else {}
         batch_count = _estimate_target_batch_count(item)
         fragment_count = _estimate_target_fragment_count(item)
-        max_candidate_pair_count = batch_count * safe_theme_count
-        max_dispute_count = fragment_count * safe_theme_count
+        targeted_batch_count_lower = _estimated_targeted_request_count(
+            batch_count=batch_count,
+            ratio=STAGE2_TARGETED_LOWER_RATIO,
+        )
+        targeted_batch_count_upper = _estimated_targeted_request_count(
+            batch_count=batch_count,
+            ratio=STAGE2_TARGETED_UPPER_RATIO,
+        )
+        coarse_seconds = (
+            _phase_seconds(request_count=batch_count, workers=llm1_workers, request_seconds=resolved_request_seconds)
+            + _phase_seconds(request_count=batch_count, workers=llm2_workers, request_seconds=resolved_request_seconds)
+        )
         lower_bound_seconds = (
-            _phase_seconds(request_count=batch_count, workers=llm1_workers, request_seconds=request_seconds)
-            + _phase_seconds(request_count=batch_count, workers=llm2_workers, request_seconds=request_seconds)
+            coarse_seconds
+            + _phase_seconds(
+                request_count=targeted_batch_count_lower,
+                workers=llm1_workers,
+                request_seconds=resolved_request_seconds,
+            )
+            + _phase_seconds(
+                request_count=targeted_batch_count_lower,
+                workers=llm2_workers,
+                request_seconds=resolved_request_seconds,
+            )
         )
         upper_bound_seconds = (
-            lower_bound_seconds
+            coarse_seconds
             + _phase_seconds(
-                request_count=max_candidate_pair_count,
+                request_count=targeted_batch_count_upper,
                 workers=llm1_workers,
-                request_seconds=request_seconds,
+                request_seconds=resolved_request_seconds,
             )
             + _phase_seconds(
-                request_count=max_candidate_pair_count,
+                request_count=targeted_batch_count_upper,
                 workers=llm2_workers,
-                request_seconds=request_seconds,
-            )
-            + _phase_seconds(
-                request_count=max_dispute_count,
-                workers=llm3_workers,
-                request_seconds=request_seconds,
+                request_seconds=resolved_request_seconds,
             )
         )
         target_estimates.append(
@@ -370,31 +396,30 @@ def build_stage2_timing_estimate(
                 "token": str(item.get("token") or ""),
                 "batch_count": batch_count,
                 "fragment_count": fragment_count,
-                "max_candidate_pair_count": max_candidate_pair_count,
-                "max_dispute_count": max_dispute_count,
+                "targeted_batch_count_lower": targeted_batch_count_lower,
+                "targeted_batch_count_upper": targeted_batch_count_upper,
                 "lower_bound_seconds": lower_bound_seconds,
                 "upper_bound_seconds": upper_bound_seconds,
             }
         )
         total_batch_count += batch_count
         total_fragment_count += fragment_count
-        total_max_candidate_pair_count += max_candidate_pair_count
-        total_max_dispute_count += max_dispute_count
+        total_targeted_batch_count_lower += targeted_batch_count_lower
+        total_targeted_batch_count_upper += targeted_batch_count_upper
         total_lower_bound_seconds += lower_bound_seconds
         total_upper_bound_seconds += upper_bound_seconds
 
     return {
-        "request_seconds": max(1, int(request_seconds)),
+        "request_seconds": resolved_request_seconds,
         "theme_count": safe_theme_count,
         "batch_count": total_batch_count,
         "fragment_count": total_fragment_count,
-        "max_candidate_pair_count": total_max_candidate_pair_count,
-        "max_dispute_count": total_max_dispute_count,
+        "targeted_screening_lower_ratio": STAGE2_TARGETED_LOWER_RATIO,
+        "targeted_screening_upper_ratio": STAGE2_TARGETED_UPPER_RATIO,
+        "targeted_batch_count_lower": total_targeted_batch_count_lower,
+        "targeted_batch_count_upper": total_targeted_batch_count_upper,
         "lower_bound_seconds": total_lower_bound_seconds,
         "upper_bound_seconds": total_upper_bound_seconds,
-        "llm1_workers": llm1_workers,
-        "llm2_workers": llm2_workers,
-        "llm3_workers": llm3_workers,
         "targets": target_estimates,
     }
 

@@ -485,6 +485,84 @@ class Stage2CliTests(unittest.TestCase):
             self.assertIn("[stage2] 完成目标 KR4c0001", stdout.getvalue())
             self.assertIn("阶段二执行完成", stdout.getvalue())
 
+    def test_run_stage2_pipeline_merges_project_primary_corpus_across_multiple_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            outputs_root = root / "outputs"
+            project_dir = outputs_root / "demo"
+            project_dir.mkdir(parents=True)
+            (project_dir / "1_research_proposal.md").write_text(
+                "---\nidea: 冬雷诗题咏\nsettled_research_direction: 冬雷意象的诗学转化\nstage2_retrieval_themes:\n  - 唐宋冬雷题咏\n---\n正文\n",
+                encoding="utf-8",
+            )
+            (project_dir / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
+            (root / ".env").write_text("VOLCENGINE_API_KEY=test-key\n", encoding="utf-8")
+
+            kanripo_root = root / "kanripo_repos"
+            repo_dir_1 = kanripo_root / "KR4c0001"
+            repo_dir_1.mkdir(parents=True)
+            (repo_dir_1 / "KR4c0001_000.txt").write_text(
+                "#+TITLE: 测试唐诗一\n<pb:KR4c0001_000-1a>\n冬雷忽作，诗人惊而有咏。\n",
+                encoding="utf-8",
+            )
+            repo_dir_2 = kanripo_root / "KR4c0002"
+            repo_dir_2.mkdir(parents=True)
+            (repo_dir_2 / "KR4c0002_000.txt").write_text(
+                "#+TITLE: 测试唐诗二\n<pb:KR4c0002_000-1a>\n冬雷再鸣，因而追咏。\n",
+                encoding="utf-8",
+            )
+
+            with (
+                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=self._fake_chat_json),
+                patch("runtime.stage2.cli.Path.cwd", return_value=root),
+                patch(
+                    "sys.argv",
+                    [
+                        "stage2-cli",
+                        "--outputs",
+                        str(outputs_root),
+                        "--project",
+                        "demo",
+                        "--kanripo-root",
+                        str(kanripo_root),
+                        "--targets",
+                        "KR4c0001",
+                        "--setup-only",
+                    ],
+                ),
+            ):
+                self.assertEqual(main(), 0)
+                first_summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
+
+            with (
+                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=self._fake_chat_json),
+                patch("runtime.stage2.cli.Path.cwd", return_value=root),
+                patch(
+                    "sys.argv",
+                    [
+                        "stage2-cli",
+                        "--outputs",
+                        str(outputs_root),
+                        "--project",
+                        "demo",
+                        "--kanripo-root",
+                        str(kanripo_root),
+                        "--targets",
+                        "KR4c0002",
+                        "--setup-only",
+                    ],
+                ),
+            ):
+                self.assertEqual(main(), 0)
+                second_summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
+
+            final_corpus = (project_dir / "2_primary_corpus.yaml").read_text(encoding="utf-8")
+            self.assertEqual(first_summary["piece_count"], 1)
+            self.assertEqual(second_summary["piece_count"], 2)
+            self.assertEqual(second_summary["record_count"], 2)
+            self.assertIn("KR4c0001_000-1a", final_corpus)
+            self.assertIn("KR4c0002_000-1a", final_corpus)
+
     def test_run_stage2_pipeline_reuses_completed_target_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

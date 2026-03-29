@@ -1237,10 +1237,15 @@ def _load_or_build_batches(
 
 
 def _write_disputes(target_dir: Path, disputes: list[dict[str, Any]]) -> Path:
-    return write_jsonl(_disputes_path(target_dir), disputes)
+    return write_json(_disputes_path(target_dir), {"records": disputes})
 
 
 def _load_disputes(path: Path) -> list[dict[str, Any]]:
+    payload = read_json(path, default=None)
+    if isinstance(payload, dict):
+        rows = payload.get("records")
+        if isinstance(rows, list):
+            return [row for row in rows if isinstance(row, dict)]
     return read_jsonl(path)
 
 
@@ -1764,6 +1769,35 @@ def _primary_corpus_payload(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _merge_primary_corpus_records(*record_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for records in record_groups:
+        for record in records:
+            piece_id = str(record.get("piece_id") or "").strip()
+            matched_theme = str(record.get("matched_theme") or "").strip()
+            if not piece_id:
+                continue
+            merged[(piece_id, matched_theme)] = {
+                "piece_id": piece_id,
+                "source_file": str(record.get("source_file") or "").strip(),
+                "matched_theme": matched_theme,
+                "original_text": str(record.get("original_text") or ""),
+                "note": str(record.get("note") or ""),
+                "needs_manual_review": bool(record.get("needs_manual_review")),
+                "manual_review_reason": str(record.get("manual_review_reason") or "").strip(),
+            }
+    return sorted(merged.values(), key=lambda item: (item["piece_id"], item["matched_theme"]))
+
+
+def _load_project_final_records(project_dir: Path) -> list[dict[str, Any]]:
+    targets_dir = stage2_workspace_dir(project_dir) / TARGETS_DIR_NAME
+    if not targets_dir.exists():
+        return []
+    return _merge_primary_corpus_records(
+        *[read_jsonl(_final_path(target_dir)) for target_dir in sorted(path for path in targets_dir.iterdir() if path.is_dir())]
+    )
+
+
 def _selection_from_manifest(manifest: dict[str, Any]) -> AnalysisTargetSelection:
     kanripo_root = Path(str(manifest.get("kanripo_root") or "")).expanduser().resolve()
     tokens = [str(item) for item in manifest.get("analysis_targets") or [] if str(item).strip()]
@@ -1908,7 +1942,6 @@ def run_stage2_pipeline(
     )
 
     summaries: list[dict[str, Any]] = []
-    merged_final_records: list[dict[str, Any]] = []
 
     try:
         for target in selection.resolved_targets:
@@ -1919,7 +1952,6 @@ def run_stage2_pipeline(
                     summary = _target_summary_from_state(_load_target_state(target_dir))
                     if summary:
                         summaries.append(summary)
-                    merged_final_records.extend(final_records)
                     _emit_progress(
                         progress_callback,
                         event="target_reused",
@@ -2129,7 +2161,6 @@ def run_stage2_pipeline(
                 llm3_completed_disputes=len(arbitration_rows),
             )
             summaries.append(summary)
-            merged_final_records.extend(final_records)
             _emit_progress(
                 progress_callback,
                 event="target_completed",
@@ -2146,7 +2177,7 @@ def run_stage2_pipeline(
                 note=f"{target.token} 完成，保留 {len(final_records)} 条记录",
             )
 
-        payload = _primary_corpus_payload(merged_final_records)
+        payload = _primary_corpus_payload(_load_project_final_records(project_path))
         write_yaml(project_path / FINAL_CORPUS_FILE_NAME, payload)
         summary_payload = {
             "project_name": project_path.name,
