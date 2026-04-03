@@ -11,57 +11,39 @@ import sys
 from typing import Any
 import unicodedata
 
-if __package__ in {None, ""}:
-    WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-    if str(WORKSPACE_ROOT) not in sys.path:
-        sys.path.insert(0, str(WORKSPACE_ROOT))
-    from runtime.stage2.catalog import measure_corpus_overview, resolve_analysis_targets
-    from runtime.stage2.runner import run_stage2_pipeline
-    from runtime.stage2.session import (
-        Stage2Context,
-        analysis_targets_from_manifest,
-        build_stage2_timing_estimate,
-        build_stage2_manifest,
-        ensure_stage2_workspace,
-        load_stage2_context,
-        load_stage2_manifest,
-        manifest_path,
-        slot_summaries,
-        stage2_workspace_dir,
-        summarize_retrieval_progress,
-        update_stage2_manifest_checkpoint,
-        write_stage2_manifest,
-    )
-else:
-    WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-    from .catalog import measure_corpus_overview, resolve_analysis_targets
-    from .runner import run_stage2_pipeline
-    from .session import (
-        Stage2Context,
-        analysis_targets_from_manifest,
-        build_stage2_timing_estimate,
-        build_stage2_manifest,
-        ensure_stage2_workspace,
-        load_stage2_context,
-        load_stage2_manifest,
-        manifest_path,
-        slot_summaries,
-        stage2_workspace_dir,
-        summarize_retrieval_progress,
-        update_stage2_manifest_checkpoint,
-        write_stage2_manifest,
-    )
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+from runtime.stage2.catalog import measure_corpus_overview, resolve_analysis_targets
+from runtime.stage2.runner import run_stage2_pipeline
+from runtime.stage2.session import (
+    Stage2Context,
+    ThemeItem,
+    analysis_targets_from_manifest,
+    build_stage2_timing_estimate,
+    build_stage2_manifest,
+    ensure_stage2_workspace,
+    load_stage2_context,
+    load_stage2_manifest,
+    manifest_path,
+    slot_summaries,
+    stage2_workspace_dir,
+    summarize_retrieval_progress,
+    update_stage2_manifest_checkpoint,
+    write_stage2_manifest,
+)
 
 DEFAULT_KANRIPO_ROOT = "data/kanripo_repos"
 DEFAULT_ENV_FILE = ".env"
 STAGE2_GUIDE_PATH = Path(__file__).resolve().parent / "docs" / "kanripo_family_guide.md"
-WORKSPACE_CONTRACT_PATH = (
-    Path(__file__).resolve().parent.parent.parent
-    / ".agent"
-    / "skills"
-    / "ai-sinology"
-    / "references"
-    / "workspace-contract.md"
+
+# 阶段一写入的占位说明；CLI 只展示主题句，不重复这类套话
+_THEME_DESC_BOILERPLATE = frozenset(
+    {
+        "阶段一明确给出的阶段二检索主题。",
+        "基于阶段一初步想法与研究方向提炼的初始主题。",
+    }
 )
 
 _ANSI_CODES = {
@@ -140,6 +122,15 @@ def _bullet(text: str, *, stream: Any = sys.stdout, tone: str = "cyan") -> str:
 
 def _kv(label: str, value: object, *, stream: Any = sys.stdout, width: int = 14) -> str:
     return f"{_label(label.ljust(width), stream=stream)} {value}"
+
+
+def _kv_display(label: str, value: object, *, label_width: int, stream: Any = sys.stdout) -> str:
+    """按终端显示宽度对齐标签列（中日文等宽字符），便于多行值纵向对齐。"""
+    return f"{_label(_pad_display(label, label_width), stream=stream)}  {value}"
+
+
+def _soft_section_break(*, stream: Any = sys.stdout) -> None:
+    print(file=stream)
 
 
 def _display_width(text: str) -> int:
@@ -306,30 +297,83 @@ def _resolve_runtime_path(raw_value: str, *, default_relative: str) -> Path:
     return (WORKSPACE_ROOT / default_relative).resolve()
 
 
-def _print_intro(project_dir: Path, stage2_context: Stage2Context, kanripo_root: Path) -> None:
+def _path_rel_workspace(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(WORKSPACE_ROOT.resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _hr(*, stream: Any = sys.stdout, width: int = 52) -> None:
+    print(_muted("─" * width, stream=stream), file=stream)
+
+
+def _theme_line_for_cli(item: ThemeItem) -> str:
+    desc = (item.description or "").strip()
+    if desc and desc not in _THEME_DESC_BOILERPLATE:
+        return f"{item.theme} · {desc}"
+    return item.theme
+
+
+def _print_intro(
+    stage2_context: Stage2Context,
+    kanripo_root: Path,
+    model_slots: list[dict[str, Any]],
+) -> None:
     stream = sys.stdout
     print()
     print(_section_title("阶段二配置", stream=stream))
-    print(_muted("阶段二将直接读取阶段一文件，不再要求额外 handoff。", stream=stream))
-    print(_muted("请先阅读 guide 或底层契约，确认本次要覆盖的 Kanripo 范围后，再输入 analysis_targets。", stream=stream))
-    print(_kv("guide", STAGE2_GUIDE_PATH, stream=stream))
-    print(_kv("底层契约", WORKSPACE_CONTRACT_PATH, stream=stream))
-    print(_kv("项目目录", project_dir, stream=stream))
-    print(_kv("Kanripo 根目录", kanripo_root, stream=stream))
-    print(_kv("研究问题", stage2_context.research_question or "(未填写)", stream=stream))
+    path_tag_w = max(_display_width("数据简介"), _display_width("数据源"))
+    _hr(stream=stream)
     print(
-        _label(
-            "阶段一检索主题:"
-            if stage2_context.retrieval_theme_source == "stage1_frontmatter"
-            else "阶段一提炼主题:",
+        _kv_display(
+            "数据简介",
+            _muted(_path_rel_workspace(STAGE2_GUIDE_PATH), stream=stream),
+            label_width=path_tag_w,
             stream=stream,
         )
     )
+    print(
+        _kv_display(
+            "数据源",
+            _muted(_path_rel_workspace(kanripo_root), stream=stream),
+            label_width=path_tag_w,
+            stream=stream,
+        )
+    )
+    _hr(stream=stream)
+
+    slot_labels = {
+        "llm1": "模型1（第一轮筛选）",
+        "llm2": "模型2（第二轮筛选）",
+        "llm3": "模型3（仲裁）",
+    }
+    model_label_w = max(_display_width(label) for label in slot_labels.values())
+
+    _soft_section_break(stream=stream)
+    for payload in model_slots:
+        slot = str(payload.get("slot") or "")
+        label = slot_labels.get(slot, slot)
+        prov = str(payload.get("provider") or "").strip()
+        model = str(payload.get("model") or "").strip()
+        detail = f"{prov} · {model}" if prov else model
+        print(_kv_display(label, detail, label_width=model_label_w, stream=stream))
+
+    rq = stage2_context.research_question or "（未填写）"
+    # 不与模型标签列同宽，避免「研究问题」与正文之间空白过大
+    rq_tag_w = _display_width("研究问题")
+    _soft_section_break(stream=stream)
+    print(_kv_display("研究问题", rq, label_width=rq_tag_w, stream=stream))
+
+    theme_title = (
+        "阶段一检索主题"
+        if stage2_context.retrieval_theme_source == "stage1_frontmatter"
+        else "阶段一提炼主题"
+    )
+    _soft_section_break(stream=stream)
+    print(_label(f"{theme_title}:", stream=stream), file=stream)
     for item in stage2_context.retrieval_themes:
-        if item.description:
-            print(_bullet(f"{item.theme} | {item.description}", stream=stream))
-        else:
-            print(_bullet(item.theme, stream=stream))
+        print(_bullet(_theme_line_for_cli(item), stream=stream))
 
 
 def _print_selection_errors(issues: tuple[Any, ...]) -> None:
@@ -346,6 +390,13 @@ def _format_int(value: object) -> str:
         return f"{int(value):,}"
     except (TypeError, ValueError):
         return str(value)
+
+
+def _clip_text(text: object, max_chars: int = 40) -> str:
+    s = str(text or "")
+    if len(s) <= max_chars:
+        return s
+    return s[: max(0, max_chars - 1)] + "…"
 
 
 def _format_duration(seconds: object) -> str:
@@ -438,6 +489,7 @@ def _prompt_analysis_targets(
     model_slots: list[dict[str, Any]],
 ) -> tuple[list[str], dict[str, object], dict[str, Any]]:
     default_value = " ".join(default_targets or []) or None
+    print()
     while True:
         raw_targets = _prompt(
             "请输入调研范围（支持 KR1a / KR1a0001，逗号或空格分隔）",
@@ -562,13 +614,9 @@ def _emit_run_summary(summary: dict[str, Any], *, as_json: bool) -> None:
     print(_kv("最终保留", f"{summary['piece_count']} 个 piece_id / {summary['record_count']} 条记录", stream=stream))
     for item in summary.get("targets") or []:
         print(_bullet(
-            f"{item['target']}"
-            f" | fragments {item['fragment_count']}"
-            f" | batches {item['batch_count']}"
-            f" | candidate_pairs {item.get('candidate_pair_count', 0)}"
-            f" | consensus {item['consensus_count']}"
-            f" | disputes {item['dispute_count']}"
-            f" | final {item['final_record_count']}"
+            f"{item['target']} · 切片 {item['fragment_count']} · 批 {item['batch_count']}"
+            f" · 候选 {item.get('candidate_pair_count', 0)} · 一致 {item['consensus_count']}"
+            f" · 分歧 {item['dispute_count']} · 保留 {item['final_record_count']}"
         , stream=stream, tone="green"))
 
 
@@ -586,93 +634,127 @@ def _build_progress_printer(*, as_json: bool):
         "arbitration_waiting": ("dim",),
     }
 
+    slot_labels = {"llm1": "模型1", "llm2": "模型2", "llm3": "模型3"}
+    ctx_target: str | None = None
+    last_waiting_line: str | None = None
+
+    def reset_ctx() -> None:
+        nonlocal ctx_target
+        ctx_target = None
+
+    def subline(target: str, detail: str) -> str:
+        """同一检索目标下，首行带「▸ 目标」，后续行缩进，避免重复目标名。"""
+        nonlocal ctx_target
+        if ctx_target != target:
+            ctx_target = target
+            return f"▸ {target}  ·  {detail}"
+        return f"    ·  {detail}"
+
     def emit(event: dict[str, Any]) -> None:
+        nonlocal last_waiting_line, ctx_target
         event_name = str(event.get("event") or "").strip()
         if not event_name:
             return
 
+        line: str
+
         if event_name == "pipeline_started":
-            line = (
-                f"[stage2] 开始执行 | 项目={event['project_name']}"
-                f" | 目标数={event['target_count']}"
-                f" | analysis_targets={', '.join(event.get('analysis_targets') or [])}"
-            )
+            reset_ctx()
+            targets = [str(t) for t in (event.get("analysis_targets") or []) if str(t).strip()]
+            if len(targets) <= 4:
+                tail = "、".join(targets) if targets else "（无）"
+            else:
+                tail = "、".join(targets[:4]) + f" 等共 {len(targets)} 个"
+            line = f"阶段二 · {event['project_name']} · {event['target_count']} 个目标 · {tail}"
         elif event_name == "target_started":
-            line = f"[stage2] 开始目标 {event['target']} | repo_dirs={event['repo_dir_count']}"
+            line = f"▸ {event['target']}  ·  文献目录 {_format_int(event['repo_dir_count'])} 个"
+            ctx_target = str(event["target"])
         elif event_name == "target_resumed":
-            line = f"[stage2] 恢复目标 {event['target']} | {event['summary']}"
+            ctx_target = str(event["target"])
+            line = f"▸ {event['target']}  ·  续跑 {_clip_text(event['summary'], 72)}"
         elif event_name == "target_reused":
-            line = f"[stage2] 复用缓存 {event['target']} | final_records={event['final_record_count']}"
+            ctx_target = str(event["target"])
+            line = f"▸ {event['target']}  ·  复用缓存，已保留 {_format_int(event['final_record_count'])} 条"
         elif event_name == "fragments_ready":
-            line = f"[stage2] {event['target']} 切片完成 | fragments={event['fragment_count']}"
+            line = subline(event["target"], f"切片 {_format_int(event['fragment_count'])} 段")
         elif event_name == "batches_ready":
-            line = f"[stage2] {event['target']} 批次就绪 | batches={event['batch_count']}"
+            line = subline(event["target"], f"分批 {_format_int(event['batch_count'])} 批")
         elif event_name == "candidate_pairs_ready":
-            line = f"[stage2] {event['target']} 候选主题就绪 | pairs={event['candidate_pair_count']}"
+            line = subline(event["target"], f"候选主题 {_format_int(event['candidate_pair_count'])} 对")
         elif event_name == "slot_resume":
             stage = str(event.get("stage") or "targeted")
             stage_label = "粗筛" if stage == "coarse" else "精筛"
-            line = f"[stage2] {event['target']} {event['slot']} {stage_label}复用缓存 | {event['completed']}/{event['total']}"
+            lab = slot_labels.get(str(event.get("slot")), str(event.get("slot")))
+            line = subline(
+                event["target"],
+                f"续跑 {lab}·{stage_label} {_format_int(event['completed'])}/{_format_int(event['total'])}",
+            )
         elif event_name == "slot_progress":
             stage = str(event.get("stage") or "targeted")
+            lab = slot_labels.get(str(event.get("slot")), str(event.get("slot")))
             if stage == "coarse":
-                line = (
-                    f"[stage2] {event['target']} {event['slot']} 粗筛进度"
-                    f" | {event['completed']}/{event['total']}"
-                    f" | 当前批次={event['batch_id']}"
+                line = subline(
+                    event["target"],
+                    f"{lab} 粗筛 {_format_int(event['completed'])}/{_format_int(event['total'])} · {event['batch_id']}",
                 )
             else:
-                line = (
-                    f"[stage2] {event['target']} {event['slot']} 精筛进度"
-                    f" | {event['completed']}/{event['total']}"
-                    f" | 当前批次={event['batch_id']}"
-                    f" | 当前主题={event['theme']}"
+                th = _clip_text(event.get("theme"), 44)
+                line = subline(
+                    event["target"],
+                    f"{lab} 精筛 {_format_int(event['completed'])}/{_format_int(event['total'])} · {event['batch_id']} · {th}",
                 )
         elif event_name == "slot_waiting":
             stage = str(event.get("stage") or "targeted")
             stage_label = "粗筛" if stage == "coarse" else "精筛"
-            line = (
-                f"[stage2] {event['target']} {event['slot']} {stage_label}等待中"
-                f" | 已完成={event['completed']}/{event['total']}"
-                f" | in_flight={event['in_flight']}"
+            lab = slot_labels.get(str(event.get("slot")), str(event.get("slot")))
+            line = subline(
+                event["target"],
+                f"限流等待 · {lab}·{stage_label} {_format_int(event['completed'])}/{_format_int(event['total'])} · 并发 {event['in_flight']}",
             )
         elif event_name == "consensus_ready":
-            line = (
-                f"[stage2] {event['target']} 双模型比对完成"
-                f" | candidate_pairs={event.get('candidate_pair_count', 0)}"
-                f" | consensus={event['consensus_count']}"
-                f" | disputes={event['dispute_count']}"
+            line = subline(
+                event["target"],
+                f"双模型一致 {_format_int(event['consensus_count'])} · 分歧 {_format_int(event['dispute_count'])}",
             )
         elif event_name == "arbitration_resume":
-            line = f"[stage2] {event['target']} llm3 复用缓存 | {event['completed']}/{event['total']}"
+            line = subline(
+                event["target"],
+                f"续跑 模型3 仲裁 {_format_int(event['completed'])}/{_format_int(event['total'])}",
+            )
         elif event_name == "arbitration_progress":
-            line = (
-                f"[stage2] {event['target']} llm3 仲裁进度"
-                f" | {event['completed']}/{event['total']}"
-                f" | 当前={event['piece_id']}"
+            line = subline(
+                event["target"],
+                f"模型3 仲裁 {_format_int(event['completed'])}/{_format_int(event['total'])} · {event['piece_id']}",
             )
         elif event_name == "arbitration_waiting":
-            line = (
-                f"[stage2] {event['target']} llm3 仲裁等待中"
-                f" | 已完成={event['completed']}/{event['total']}"
-                f" | in_flight={event['in_flight']}"
+            line = subline(
+                event["target"],
+                f"限流等待 · 模型3 仲裁 {_format_int(event['completed'])}/{_format_int(event['total'])} · 并发 {event['in_flight']}",
             )
         elif event_name == "target_completed":
             line = (
-                f"[stage2] 完成目标 {event['target']}"
-                f" | final_records={event['final_record_count']}"
-                f" | final_pieces={event['final_piece_count']}"
+                f"✓ {event['target']} 完成 · 保留 {_format_int(event['final_record_count'])} 条"
+                f" · {_format_int(event['final_piece_count'])} 段"
             )
+            ctx_target = None
         elif event_name == "pipeline_completed":
+            reset_ctx()
             line = (
-                f"[stage2] 全部完成 | 项目={event['project_name']}"
-                f" | piece_count={event['piece_count']}"
-                f" | record_count={event['record_count']}"
+                f"阶段二完成 · {event['project_name']}"
+                f" · {_format_int(event['piece_count'])} 段 · {_format_int(event['record_count'])} 条"
             )
         elif event_name == "pipeline_failed":
-            line = f"[stage2] 执行失败 | 项目={event['project_name']} | error={event['error']}"
+            reset_ctx()
+            line = f"阶段二失败 · {event['project_name']} · {event['error']}"
         else:
-            line = f"[stage2] {json.dumps(event, ensure_ascii=False)}"
+            line = f"阶段二 · {json.dumps(event, ensure_ascii=False)}"
+
+        if event_name in ("slot_waiting", "arbitration_waiting"):
+            if line == last_waiting_line:
+                return
+            last_waiting_line = line
+        else:
+            last_waiting_line = None
 
         print(_style(line, *event_styles.get(event_name, ()), stream=stream), file=stream, flush=True)
 
@@ -717,11 +799,11 @@ def main() -> int:
     if not kanripo_root.exists():
         raise SystemExit(f"Kanripo 根目录不存在: {kanripo_root}")
 
-    if not args.json:
-        _print_intro(project_dir, stage2_context, kanripo_root)
-
     resolved_env_file = _resolved_env_file(args.env_file)
     model_slots = slot_summaries(dotenv_path=resolved_env_file)
+
+    if not args.json:
+        _print_intro(stage2_context, kanripo_root, model_slots)
     theme_count = len(stage2_context.target_themes)
 
     if args.targets:

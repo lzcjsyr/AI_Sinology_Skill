@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 from .api_config import STAGE2_RUNTIME_DEFAULTS, fallback_payload, screening_batch_char_limit, slot_payload, slot_worker_limit
 from .catalog import (
     PAGE_MARKER_PATTERN,
+    TECH_COMMENT_PATTERN,
     AnalysisTargetSelection,
     ResolvedAnalysisTarget,
     resolve_analysis_targets,
@@ -36,10 +37,6 @@ from .session import (
 
 
 TITLE_PATTERN = re.compile(r"^#\+TITLE:\s*(.+)$", re.MULTILINE)
-TECH_COMMENT_PATTERN = re.compile(
-    r"\bKR\d+[a-z]?\d*(?:_[A-Za-z0-9\-]+)*\b|_tls_|^pb:",
-    re.IGNORECASE,
-)
 CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 FRAGMENT_FILE_NAME = "fragments.jsonl"
 BATCH_FILE_NAME = "batches.jsonl"
@@ -402,7 +399,7 @@ class OpenAICompatClient:
                     self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
                 if exc.code in TRANSIENT_HTTP_STATUS_CODES and attempt < min(HTTP_429_MAX_RETRIES, network_retry_limit):
                     attempt += 1
-                    time.sleep(self._retry_delay_seconds(exc, attempt=attempt))
+                    time.sleep(self._http_retry_delay(exc, attempt=attempt))
                     continue
                 raise Stage2RunnerError(f"{self.slot} 请求失败: HTTP {exc.code} {message[:500]}") from exc
             except (URLError, TimeoutError, SocketTimeout) as exc:
@@ -410,20 +407,19 @@ class OpenAICompatClient:
                     self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
                 if attempt < network_retry_limit:
                     attempt += 1
-                    time.sleep(self._network_retry_delay_seconds(attempt=attempt))
+                    time.sleep(self._http_retry_delay(None, attempt=attempt))
                     continue
                 raise Stage2RunnerError(f"{self.slot} 网络错误: {exc}") from exc
 
-    def _retry_delay_seconds(self, exc: HTTPError, *, attempt: int) -> float:
-        retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
-        if retry_after is not None:
-            try:
-                return max(0.0, min(float(retry_after), HTTP_429_BACKOFF_CAP_SECONDS))
-            except (TypeError, ValueError):
-                pass
-        return min(HTTP_429_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)), HTTP_429_BACKOFF_CAP_SECONDS)
-
-    def _network_retry_delay_seconds(self, *, attempt: int) -> float:
+    @staticmethod
+    def _http_retry_delay(exc: HTTPError | None, *, attempt: int) -> float:
+        if exc is not None:
+            retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+            if retry_after is not None:
+                try:
+                    return max(0.0, min(float(retry_after), HTTP_429_BACKOFF_CAP_SECONDS))
+                except (TypeError, ValueError):
+                    pass
         return min(HTTP_429_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)), HTTP_429_BACKOFF_CAP_SECONDS)
 
     def chat_json(
@@ -636,7 +632,8 @@ def _normalize_targeted_screening_payload(
             }
         )
 
-    normalized.sort(key=lambda item: expected_piece_ids.index(item["piece_id"]))
+    order = {pid: idx for idx, pid in enumerate(expected_piece_ids)}
+    normalized.sort(key=lambda item: order[item["piece_id"]])
     return normalized
 
 
