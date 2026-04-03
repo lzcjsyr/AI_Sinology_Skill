@@ -160,7 +160,7 @@ def _render_box(title: str, lines: list[str]) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="确认阶段二调研范围，统计正文规模，并写入 outputs/<project>/_stage2/2_stage2_manifest.json。"
+        description="确认阶段二调研范围，统计正文规模，并写入 outputs/<project>/_stage2/manifest.json。"
     )
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
     parser.add_argument("--project", help="输出目录下的项目名。")
@@ -196,7 +196,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint-action",
         choices=("start", "checkpoint", "pause", "complete", "reset"),
-        help="直接更新 outputs/<project>/_stage2/2_stage2_manifest.json 中的检索断点，不重新进入配置流程。",
+        help="直接更新 outputs/<project>/_stage2/manifest.json 中的检索断点，不重新进入配置流程。",
     )
     parser.add_argument("--checkpoint-target", help="断点操作对应的当前检索目标，如 KR1a 或 KR1a0157。")
     parser.add_argument("--checkpoint-cursor", help="当前检索游标或批次标记。")
@@ -435,7 +435,6 @@ def _print_timing_estimate(timing_estimate: dict[str, Any] | None) -> None:
         f" | 批次 {_format_int(timing_estimate.get('batch_count', 0))}"
         f" | 预估耗时 {_format_duration(timing_estimate.get('lower_bound_seconds', 0))}"
         f" - {_format_duration(timing_estimate.get('upper_bound_seconds', 0))}"
-        f"（按单次请求 {_format_int(timing_estimate.get('request_seconds', 0))} 秒）"
     )
     print(_style(line, "yellow", stream=sys.stdout))
 
@@ -474,7 +473,6 @@ def _print_corpus_overview(overview: Any, timing_estimate: dict[str, Any] | None
                     f"{_format_duration(timing_estimate.get('lower_bound_seconds', 0))}"
                     f" - {_format_duration(timing_estimate.get('upper_bound_seconds', 0))}"
                 ),
-                f"  单次请求    {_format_int(timing_estimate.get('request_seconds', 0))} 秒",
             ]
         )
     print()

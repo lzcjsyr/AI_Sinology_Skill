@@ -205,7 +205,7 @@ class Stage2SessionTests(unittest.TestCase):
         self.assertEqual(len(manifest["model_slots"]), 3)
         self.assertEqual(manifest["timing_estimate"]["theme_count"], 2)
         self.assertGreaterEqual(manifest["timing_estimate"]["upper_bound_seconds"], manifest["timing_estimate"]["lower_bound_seconds"])
-        self.assertTrue(manifest["stage2_manifest_path"].endswith("/_stage2/2_stage2_manifest.json"))
+        self.assertTrue(manifest["stage2_manifest_path"].endswith("/_stage2/manifest.json"))
 
     def test_build_stage2_manifest_does_not_leak_process_env_when_env_values_are_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

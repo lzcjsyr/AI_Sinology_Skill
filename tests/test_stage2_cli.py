@@ -475,7 +475,7 @@ class Stage2CliTests(unittest.TestCase):
             disputes_text = (project_dir / "_stage2" / "targets" / "KR4c0001" / "disputes.jsonl").read_text(encoding="utf-8")
             self.assertIn("KR4c0001_000-1b::唐宋冬雷题咏", disputes_text)
             self.assertTrue((project_dir / "_stage2" / "targets" / "KR4c0001" / "llm3_arbitration.jsonl").exists())
-            manifest_text = (project_dir / "_stage2" / "2_stage2_manifest.json").read_text(encoding="utf-8")
+            manifest_text = (project_dir / "_stage2" / "manifest.json").read_text(encoding="utf-8")
             self.assertIn('"status": "completed"', manifest_text)
             self.assertIn('"current_target": ""', manifest_text)
             self.assertIn("[stage2] 开始执行", stdout.getvalue())

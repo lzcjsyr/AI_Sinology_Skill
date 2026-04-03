@@ -59,7 +59,7 @@ Skill 在每次推进阶段后都应同步更新这个文件。
 - 阶段二只负责原始文献勘查与一手灵感积累，不与二手学术史混写。
 - 阶段二默认直接读取阶段一文件，优先读取 `stage2_retrieval_themes`，没有时才回退到研究方向与 idea 的兜底推断；不等待后置 scholarship map。
 - 由 Skill 外部运行时生成；Skill 只约束写回契约。
-- 推荐同时提供：`outputs/<project>/_stage2/2_stage2_manifest.json`
+- 推荐同时提供：`outputs/<project>/_stage2/manifest.json`
 - 推荐同时保留：`outputs/<project>/_stage2/session.json`
 
 `2_primary_corpus.yaml` 的最小结构：

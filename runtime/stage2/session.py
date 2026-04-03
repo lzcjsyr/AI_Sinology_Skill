@@ -13,7 +13,7 @@ from .api_config import STAGE2_MODELS, merged_env, screening_batch_char_limit, s
 from .catalog import normalize_scope
 
 
-STAGE2_MANIFEST_FILE = "2_stage2_manifest.json"
+STAGE2_MANIFEST_FILE = "manifest.json"
 STAGE2_WORKSPACE_DIR = "_stage2"
 LEGACY_STAGE2_SESSION_FILE = "session.json"
 RETRIEVAL_PROGRESS_VERSION = 1

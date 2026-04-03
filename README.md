@@ -16,7 +16,7 @@
 1. 用 `$ai-sinology` 或 `python3 .agent/skills/ai-sinology/scripts/init_project.py <project>` 创建 `outputs/<project>/` 和 `project_progress.yaml`
 2. 完成阶段一，生成 `1_journal_targeting.md` 与 `1_research_proposal.md`；建议在 front matter 中显式写入 `stage2_retrieval_themes`
 3. 运行 `python3 -m runtime.stage2.cli`，从阶段一输入出发读取检索主题并确认阶段二原始文献检索范围，生成：
-   - `outputs/<project>/_stage2/2_stage2_manifest.json`
+   - `outputs/<project>/_stage2/manifest.json`
 4. 运行阶段二 CLI，直接执行 Kanripo 原始文献勘查，并写回 `outputs/<project>/2_primary_corpus.yaml`
 5. 回到 Skill 内推进阶段三：
    - `3A` 生成 `3a_deepened_thinking.md`
@@ -54,7 +54,7 @@
 │       ├── 1_research_proposal.md
 │       ├── 2_primary_corpus.yaml
 │       ├── _stage2/
-│       │   ├── 2_stage2_manifest.json
+│       │   ├── manifest.json
 │       ├── 3a_deepened_thinking.md
 │       ├── 3c_scholarship_map.yaml
 │       ├── _stage3b/

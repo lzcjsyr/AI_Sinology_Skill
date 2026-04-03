@@ -13,7 +13,7 @@
       "name": "原始文献勘查与一手灵感",
       "required_all": ["2_primary_corpus.yaml"],
       "required_any": [],
-      "recommended": ["_stage2/2_stage2_manifest.json", "_stage2"]
+      "recommended": ["_stage2/manifest.json", "_stage2"]
     },
     {
       "index": 3,
