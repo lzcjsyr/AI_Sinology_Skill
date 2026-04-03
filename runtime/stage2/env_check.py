@@ -10,8 +10,11 @@ from typing import Any
 
 from .api_config import STAGE2_MODELS, merged_env, slot_payload
 from .catalog import catalog_root, list_available_scope_dirs, list_available_scope_options
-from .prompts import FORMAT_STRICT_SYSTEM, FORMAT_STRICT_USER
 from .session import slot_summaries
+
+# api_smoke_test 专用：最小 JSON 往返，与阶段二主流程提示词无关
+API_SMOKE_SYSTEM = "你是一个严格遵守格式的助手。"
+API_SMOKE_USER = '请只返回一个极短 JSON：{"ok":true}'
 
 
 def static_checks(kanripo_root: str | Path, *, env_file: str | Path | None = None) -> dict[str, Any]:
@@ -63,8 +66,8 @@ def api_smoke_test(slot: str, *, env_file: str | Path | None = None) -> dict[str
     response = completion(
         model=payload["model"],
         messages=[
-            {"role": "system", "content": FORMAT_STRICT_SYSTEM},
-            {"role": "user", "content": FORMAT_STRICT_USER},
+            {"role": "system", "content": API_SMOKE_SYSTEM},
+            {"role": "user", "content": API_SMOKE_USER},
         ],
         temperature=0.0,
         custom_llm_provider="openai",

@@ -35,19 +35,12 @@ from .catalog import (
 )
 from .io_utils import read_json, read_jsonl, write_json, write_jsonl, write_yaml
 from .prompts import (
-    ARBITRATION_LLM1_LABEL,
-    ARBITRATION_LLM2_LABEL,
-    ARBITRATION_ORIGINAL_LABEL,
     ARBITRATION_SYSTEM,
-    ARBITRATION_TASK,
-    ARBITRATION_THEME_LABEL,
+    ARBITRATION_USER_TEMPLATE,
     COARSE_SYSTEM,
-    COARSE_USER_INSTRUCTION,
-    COARSE_USER_LEAD,
-    SOURCE_FILE_LABEL,
+    COARSE_USER_TEMPLATE,
     TARGETED_SYSTEM,
-    TARGETED_USER_INSTRUCTION,
-    TARGETED_USER_THEME_LABEL,
+    TARGETED_USER_TEMPLATE,
 )
 from .session import (
     analysis_targets_from_manifest,
@@ -492,10 +485,10 @@ def _coarse_screening_messages(
         {"role": "system", "content": COARSE_SYSTEM},
         {
             "role": "user",
-            "content": (
-                f"{COARSE_USER_LEAD}{themes_block}\n\n"
-                f"{SOURCE_FILE_LABEL}{batch.source_file}\n"
-                f"{COARSE_USER_INSTRUCTION}{batch.batch_text}"
+            "content": COARSE_USER_TEMPLATE.format(
+                themes_block=themes_block,
+                source_file=batch.source_file,
+                batch_text=batch.batch_text,
             ),
         },
     ]
@@ -517,10 +510,10 @@ def _targeted_screening_messages(
         {"role": "system", "content": TARGETED_SYSTEM},
         {
             "role": "user",
-            "content": (
-                f"{TARGETED_USER_THEME_LABEL}{theme}\n\n"
-                f"{SOURCE_FILE_LABEL}{batch.source_file}\n"
-                f"{TARGETED_USER_INSTRUCTION}{'\n\n'.join(fragment_lines)}"
+            "content": TARGETED_USER_TEMPLATE.format(
+                theme=theme,
+                source_file=batch.source_file,
+                fragments_block="\n\n".join(fragment_lines),
             ),
         },
     ]
@@ -537,12 +530,11 @@ def _arbitration_messages(
         {"role": "system", "content": ARBITRATION_SYSTEM},
         {
             "role": "user",
-            "content": (
-                f"{ARBITRATION_THEME_LABEL}{theme}\n\n"
-                f"{ARBITRATION_ORIGINAL_LABEL}{original_text}\n\n"
-                f"{ARBITRATION_LLM1_LABEL}{json.dumps(llm1_result, ensure_ascii=False)}\n"
-                f"{ARBITRATION_LLM2_LABEL}{json.dumps(llm2_result, ensure_ascii=False)}\n\n"
-                f"{ARBITRATION_TASK}"
+            "content": ARBITRATION_USER_TEMPLATE.format(
+                theme=theme,
+                original_text=original_text,
+                llm1_json=json.dumps(llm1_result, ensure_ascii=False),
+                llm2_json=json.dumps(llm2_result, ensure_ascii=False),
             ),
         },
     ]
