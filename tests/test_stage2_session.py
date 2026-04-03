@@ -13,6 +13,8 @@ from runtime.stage2.session import (
     load_stage2_context,
     load_stage2_manifest,
     manifest_path,
+    merge_analysis_target_lists,
+    merge_corpus_overview_dicts,
     reconcile_retrieval_progress,
     update_retrieval_progress,
     update_stage2_manifest_checkpoint,
@@ -21,7 +23,7 @@ from runtime.stage2.session import (
 
 
 class Stage2SessionTests(unittest.TestCase):
-    def test_build_stage2_timing_estimate_uses_targeted_screening_ratios_without_arbitration(self) -> None:
+    def test_build_stage2_timing_estimate_upper_is_multiplier_of_lower(self) -> None:
         timing = build_stage2_timing_estimate(
             corpus_overview={
                 "targets": [
@@ -41,10 +43,135 @@ class Stage2SessionTests(unittest.TestCase):
             request_seconds=20,
         )
 
-        self.assertEqual(timing["targeted_batch_count_lower"], 10)
-        self.assertEqual(timing["targeted_batch_count_upper"], 50)
+        self.assertEqual(timing["targeted_batch_count"], 10)
         self.assertEqual(timing["lower_bound_seconds"], 4040)
-        self.assertEqual(timing["upper_bound_seconds"], 4200)
+        self.assertEqual(timing["upper_bound_seconds"], 6060)
+        self.assertEqual(timing["upper_bound_multiplier"], 1.5)
+
+    def test_merge_analysis_target_lists_dedupes_and_preserves_order(self) -> None:
+        self.assertEqual(
+            merge_analysis_target_lists(["KR1a", "KR3j"], ["KR3j", "KR1a0001"]),
+            ["KR1a", "KR3j", "KR1a0001"],
+        )
+
+    def test_merge_corpus_overview_dicts_combines_targets(self) -> None:
+        prev = {
+            "repo_dir_count": 1,
+            "text_file_count": 1,
+            "text_char_count": 10,
+            "fragment_count": 2,
+            "batch_count": 1,
+            "targets": [
+                {
+                    "token": "KR1a0001",
+                    "level": "repo",
+                    "repo_dir_count": 1,
+                    "text_file_count": 1,
+                    "text_char_count": 10,
+                    "fragment_count": 2,
+                    "batch_count": 1,
+                }
+            ],
+        }
+        nxt = {
+            "repo_dir_count": 1,
+            "text_file_count": 2,
+            "text_char_count": 40,
+            "fragment_count": 6,
+            "batch_count": 3,
+            "targets": [
+                {
+                    "token": "KR1a0002",
+                    "level": "repo",
+                    "repo_dir_count": 1,
+                    "text_file_count": 2,
+                    "text_char_count": 40,
+                    "fragment_count": 6,
+                    "batch_count": 3,
+                }
+            ],
+        }
+        merged = merge_corpus_overview_dicts(prev, nxt)
+        self.assertEqual(merged["text_char_count"], 50)
+        self.assertEqual({t["token"] for t in merged["targets"]}, {"KR1a0001", "KR1a0002"})
+
+    def test_build_stage2_manifest_merges_previous_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace_root = Path(tmpdir)
+            outputs_root = workspace_root / "outputs"
+            project_dir = outputs_root / "demo"
+            project_dir.mkdir(parents=True)
+            (project_dir / "1_research_proposal.md").write_text(
+                "---\nidea: 明代祈雨\nsettled_research_direction: 明代祈雨与国家礼制\n---\n正文\n",
+                encoding="utf-8",
+            )
+            (project_dir / "1_journal_targeting.md").write_text("目标期刊：《中国语文》\n", encoding="utf-8")
+            stage2_context = load_stage2_context(project_dir)
+            first = build_stage2_manifest(
+                outputs_root=outputs_root,
+                project_name="demo",
+                kanripo_root=workspace_root / "data" / "kanripo_repos",
+                analysis_targets=["KR1a0001"],
+                corpus_overview={
+                    "repo_dir_count": 1,
+                    "text_file_count": 1,
+                    "text_char_count": 50,
+                    "fragment_count": 2,
+                    "batch_count": 1,
+                    "targets": [
+                        {
+                            "token": "KR1a0001",
+                            "level": "repo",
+                            "repo_dir_count": 1,
+                            "text_file_count": 1,
+                            "text_char_count": 50,
+                            "fragment_count": 2,
+                            "batch_count": 1,
+                        }
+                    ],
+                },
+                stage2_context=stage2_context,
+                env_values={},
+            )
+            first["retrieval_progress"] = update_retrieval_progress(
+                first["analysis_targets"],
+                progress=first["retrieval_progress"],
+                action="complete",
+                target="KR1a0001",
+            )
+            second = build_stage2_manifest(
+                outputs_root=outputs_root,
+                project_name="demo",
+                kanripo_root=workspace_root / "data" / "kanripo_repos",
+                analysis_targets=["KR1a0002"],
+                corpus_overview={
+                    "repo_dir_count": 1,
+                    "text_file_count": 3,
+                    "text_char_count": 80,
+                    "fragment_count": 5,
+                    "batch_count": 2,
+                    "targets": [
+                        {
+                            "token": "KR1a0002",
+                            "level": "repo",
+                            "repo_dir_count": 1,
+                            "text_file_count": 3,
+                            "text_char_count": 80,
+                            "fragment_count": 5,
+                            "batch_count": 2,
+                        }
+                    ],
+                },
+                stage2_context=stage2_context,
+                env_values={},
+                previous_manifest=first,
+            )
+
+        assert stage2_context is not None
+        self.assertEqual(second["analysis_targets"], ["KR1a0001", "KR1a0002"])
+        self.assertEqual(second["generated_at"], first["generated_at"])
+        self.assertIn("KR1a0001", second["retrieval_progress"]["completed_targets"])
+        self.assertEqual(second["corpus_overview"]["text_char_count"], 130)
 
     def test_load_stage2_context_reads_stage1_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -178,7 +305,6 @@ class Stage2SessionTests(unittest.TestCase):
             stage2_context = load_stage2_context(project_dir)
 
             manifest = build_stage2_manifest(
-                workspace_root=workspace_root,
                 outputs_root=outputs_root,
                 project_name="demo",
                 kanripo_root=workspace_root / "data" / "kanripo_repos",
@@ -195,17 +321,17 @@ class Stage2SessionTests(unittest.TestCase):
 
         assert stage2_context is not None
         self.assertEqual(manifest["project_name"], "demo")
-        self.assertEqual(manifest["theme_source"], "stage1_proposal")
+        self.assertNotIn("theme_source", manifest)
         self.assertEqual(manifest["retrieval_theme_source"], "stage1_inference")
-        self.assertEqual(manifest["retrieval_themes"][0]["theme"], "明代祈雨与国家礼制")
         self.assertEqual(manifest["target_themes"][0]["theme"], "明代祈雨与国家礼制")
+        self.assertNotIn("retrieval_themes", manifest)
         self.assertEqual(manifest["research_question"], "明代祈雨与国家礼制")
         self.assertEqual(manifest["analysis_targets"], ["KR1a", "KR3j0160"])
         self.assertEqual(manifest["corpus_overview"]["text_char_count"], 12345)
         self.assertEqual(len(manifest["model_slots"]), 3)
         self.assertEqual(manifest["timing_estimate"]["theme_count"], 2)
         self.assertGreaterEqual(manifest["timing_estimate"]["upper_bound_seconds"], manifest["timing_estimate"]["lower_bound_seconds"])
-        self.assertTrue(manifest["stage2_manifest_path"].endswith("/_stage2/manifest.json"))
+        self.assertTrue(manifest["project_dir"].endswith("/outputs/demo"))
 
     def test_build_stage2_manifest_does_not_leak_process_env_when_env_values_are_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -222,7 +348,6 @@ class Stage2SessionTests(unittest.TestCase):
 
             with patch.dict("os.environ", {"VOLCENGINE_API_KEY": "from-os"}, clear=False):
                 manifest = build_stage2_manifest(
-                    workspace_root=workspace_root,
                     outputs_root=outputs_root,
                     project_name="demo",
                     kanripo_root=workspace_root / "data" / "kanripo_repos",
@@ -238,7 +363,7 @@ class Stage2SessionTests(unittest.TestCase):
                 )
 
         assert stage2_context is not None
-        self.assertTrue(all(not slot["has_api_key"] for slot in manifest["model_slots"]))
+        self.assertTrue(all("api_key_env" not in slot for slot in manifest["model_slots"]))
 
     def test_stage2_workspace_persists_manifest_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

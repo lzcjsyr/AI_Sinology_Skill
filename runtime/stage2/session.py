@@ -1,4 +1,7 @@
-"""管理阶段二原始文献运行时的工作目录、manifest 和检索断点状态。"""
+"""管理阶段二原始文献运行时的工作目录、manifest 和检索断点状态。
+
+仅维护当前 manifest.json（v2）路径；不读取或合并旧版 session.json 等旁路文件。
+"""
 
 from __future__ import annotations
 
@@ -9,17 +12,22 @@ import math
 from pathlib import Path
 from typing import Any
 
-from .api_config import STAGE2_MODELS, merged_env, screening_batch_char_limit, slot_payload, slot_worker_limit
+from .api_config import (
+    STAGE2_MODELS,
+    merged_env,
+    screening_batch_char_limit,
+    scaled_slot_worker_limit,
+    slot_payload,
+)
 from .catalog import normalize_scope
 
 
 STAGE2_MANIFEST_FILE = "manifest.json"
 STAGE2_WORKSPACE_DIR = "_stage2"
-LEGACY_STAGE2_SESSION_FILE = "session.json"
 RETRIEVAL_PROGRESS_VERSION = 1
 STAGE2_ESTIMATED_REQUEST_SECONDS = 20
-STAGE2_TARGETED_LOWER_RATIO = 0.01
-STAGE2_TARGETED_UPPER_RATIO = 0.05
+STAGE2_TARGETED_SCREENING_RATIO = 0.01
+STAGE2_TIMING_UPPER_BOUND_MULTIPLIER = 1.5
 
 
 @dataclass(frozen=True)
@@ -274,14 +282,20 @@ def slot_summaries(
     return payloads
 
 
-def _stage2_worker_limit(model_slots: list[dict[str, Any]], slot: str) -> int:
+def _stage2_worker_limit(
+    model_slots: list[dict[str, Any]],
+    slot: str,
+    *,
+    dotenv_path: str | Path | None = None,
+    env_values: dict[str, str] | None = None,
+) -> int:
     for item in model_slots:
         if str(item.get("slot") or "") == slot:
             try:
                 return max(1, int(item.get("max_concurrency") or 0))
             except (TypeError, ValueError):
                 break
-    return slot_worker_limit(slot)
+    return scaled_slot_worker_limit(slot, dotenv_path=dotenv_path, env_values=env_values)
 
 
 def _estimate_target_batch_count(item: dict[str, Any]) -> int:
@@ -326,19 +340,29 @@ def build_stage2_timing_estimate(
     theme_count: int,
     model_slots: list[dict[str, Any]],
     request_seconds: int = STAGE2_ESTIMATED_REQUEST_SECONDS,
+    dotenv_path: str | Path | None = None,
+    env_values: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     safe_theme_count = max(0, int(theme_count))
     resolved_request_seconds = max(1, int(request_seconds))
-    llm1_workers = _stage2_worker_limit(model_slots, "llm1")
-    llm2_workers = _stage2_worker_limit(model_slots, "llm2")
+    llm1_workers = _stage2_worker_limit(
+        model_slots,
+        "llm1",
+        dotenv_path=dotenv_path,
+        env_values=env_values,
+    )
+    llm2_workers = _stage2_worker_limit(
+        model_slots,
+        "llm2",
+        dotenv_path=dotenv_path,
+        env_values=env_values,
+    )
 
     target_estimates: list[dict[str, Any]] = []
     total_batch_count = 0
     total_fragment_count = 0
-    total_targeted_batch_count_lower = 0
-    total_targeted_batch_count_upper = 0
+    total_targeted_batch_count = 0
     total_lower_bound_seconds = 0
-    total_upper_bound_seconds = 0
 
     raw_targets = [item for item in corpus_overview.get("targets") or [] if isinstance(item, dict)]
     if not raw_targets and (
@@ -353,13 +377,9 @@ def build_stage2_timing_estimate(
         item = raw_target if isinstance(raw_target, dict) else {}
         batch_count = _estimate_target_batch_count(item)
         fragment_count = _estimate_target_fragment_count(item)
-        targeted_batch_count_lower = _estimated_targeted_request_count(
+        targeted_batch_count = _estimated_targeted_request_count(
             batch_count=batch_count,
-            ratio=STAGE2_TARGETED_LOWER_RATIO,
-        )
-        targeted_batch_count_upper = _estimated_targeted_request_count(
-            batch_count=batch_count,
-            ratio=STAGE2_TARGETED_UPPER_RATIO,
+            ratio=STAGE2_TARGETED_SCREENING_RATIO,
         )
         coarse_seconds = (
             _phase_seconds(request_count=batch_count, workers=llm1_workers, request_seconds=resolved_request_seconds)
@@ -368,25 +388,12 @@ def build_stage2_timing_estimate(
         lower_bound_seconds = (
             coarse_seconds
             + _phase_seconds(
-                request_count=targeted_batch_count_lower,
+                request_count=targeted_batch_count,
                 workers=llm1_workers,
                 request_seconds=resolved_request_seconds,
             )
             + _phase_seconds(
-                request_count=targeted_batch_count_lower,
-                workers=llm2_workers,
-                request_seconds=resolved_request_seconds,
-            )
-        )
-        upper_bound_seconds = (
-            coarse_seconds
-            + _phase_seconds(
-                request_count=targeted_batch_count_upper,
-                workers=llm1_workers,
-                request_seconds=resolved_request_seconds,
-            )
-            + _phase_seconds(
-                request_count=targeted_batch_count_upper,
+                request_count=targeted_batch_count,
                 workers=llm2_workers,
                 request_seconds=resolved_request_seconds,
             )
@@ -396,28 +403,29 @@ def build_stage2_timing_estimate(
                 "token": str(item.get("token") or ""),
                 "batch_count": batch_count,
                 "fragment_count": fragment_count,
-                "targeted_batch_count_lower": targeted_batch_count_lower,
-                "targeted_batch_count_upper": targeted_batch_count_upper,
+                "targeted_batch_count": targeted_batch_count,
                 "lower_bound_seconds": lower_bound_seconds,
-                "upper_bound_seconds": upper_bound_seconds,
             }
         )
         total_batch_count += batch_count
         total_fragment_count += fragment_count
-        total_targeted_batch_count_lower += targeted_batch_count_lower
-        total_targeted_batch_count_upper += targeted_batch_count_upper
+        total_targeted_batch_count += targeted_batch_count
         total_lower_bound_seconds += lower_bound_seconds
-        total_upper_bound_seconds += upper_bound_seconds
+
+    total_upper_bound_seconds = (
+        0
+        if total_lower_bound_seconds <= 0
+        else math.ceil(total_lower_bound_seconds * STAGE2_TIMING_UPPER_BOUND_MULTIPLIER)
+    )
 
     return {
         "request_seconds": resolved_request_seconds,
         "theme_count": safe_theme_count,
         "batch_count": total_batch_count,
         "fragment_count": total_fragment_count,
-        "targeted_screening_lower_ratio": STAGE2_TARGETED_LOWER_RATIO,
-        "targeted_screening_upper_ratio": STAGE2_TARGETED_UPPER_RATIO,
-        "targeted_batch_count_lower": total_targeted_batch_count_lower,
-        "targeted_batch_count_upper": total_targeted_batch_count_upper,
+        "targeted_screening_ratio": STAGE2_TARGETED_SCREENING_RATIO,
+        "upper_bound_multiplier": STAGE2_TIMING_UPPER_BOUND_MULTIPLIER,
+        "targeted_batch_count": total_targeted_batch_count,
         "lower_bound_seconds": total_lower_bound_seconds,
         "upper_bound_seconds": total_upper_bound_seconds,
         "targets": target_estimates,
@@ -426,6 +434,60 @@ def build_stage2_timing_estimate(
 
 def analysis_targets_from_manifest(manifest_payload: dict[str, Any]) -> list[str]:
     return normalize_analysis_targets(_as_string_list(manifest_payload.get("analysis_targets")))
+
+
+def merge_analysis_target_lists(previous: list[str], incoming: list[str]) -> list[str]:
+    prev = normalize_analysis_targets(previous)
+    seen = set(prev)
+    merged = list(prev)
+    for token in normalize_analysis_targets(incoming):
+        if token not in seen:
+            seen.add(token)
+            merged.append(token)
+    return merged
+
+
+def merge_corpus_overview_dicts(
+    previous: dict[str, Any] | None,
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    if not previous:
+        return dict(incoming)
+    by_token: dict[str, dict[str, Any]] = {}
+    for row in previous.get("targets") or []:
+        if isinstance(row, dict) and row.get("token"):
+            by_token[str(row["token"])] = dict(row)
+    for row in incoming.get("targets") or []:
+        if isinstance(row, dict) and row.get("token"):
+            by_token[str(row["token"])] = dict(row)
+    merged_targets = sorted(by_token.values(), key=lambda r: str(r.get("token", "")))
+    repo_dir = sum(int(t.get("repo_dir_count") or 0) for t in merged_targets)
+    text_files = sum(int(t.get("text_file_count") or 0) for t in merged_targets)
+    chars = sum(int(t.get("text_char_count") or 0) for t in merged_targets)
+    frags = sum(int(t.get("fragment_count") or 0) for t in merged_targets)
+    batches = sum(int(t.get("batch_count") or 0) for t in merged_targets)
+    return {
+        "repo_dir_count": repo_dir,
+        "text_file_count": text_files,
+        "text_char_count": chars,
+        "fragment_count": frags,
+        "batch_count": batches,
+        "targets": merged_targets,
+    }
+
+
+def _slim_model_slots_for_manifest(slots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    slim: list[dict[str, Any]] = []
+    for item in slots:
+        slim.append(
+            {
+                "slot": item.get("slot"),
+                "provider": item.get("provider"),
+                "model": item.get("model"),
+                "max_concurrency": item.get("max_concurrency"),
+            }
+        )
+    return slim
 
 
 def reconcile_retrieval_progress(
@@ -492,8 +554,6 @@ def normalize_stage2_manifest(payload: dict[str, Any]) -> dict[str, Any]:
         )
     else:
         content.pop("retrieval_progress", None)
-    content.pop("stage2_session_path", None)
-    content.pop("stage2_workspace_manifest_path", None)
     for key in ("last_run_note", "last_run_at", "updated_at"):
         value = str(payload.get(key) or "").strip()
         if value:
@@ -644,10 +704,6 @@ def ensure_stage2_workspace(project_dir: str | Path) -> Path:
     return path
 
 
-def _legacy_session_path(project_dir: str | Path) -> Path:
-    return stage2_workspace_dir(project_dir) / LEGACY_STAGE2_SESSION_FILE
-
-
 def _read_json_payload(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -660,21 +716,13 @@ def _read_json_payload(path: Path) -> dict[str, Any]:
 
 def load_stage2_manifest(project_dir: str | Path) -> dict[str, Any]:
     payload = _read_json_payload(manifest_path(project_dir))
-    legacy_payload: dict[str, Any] = {}
-    if "status" not in payload and "retrieval_progress" not in payload:
-        legacy_payload = _read_json_payload(_legacy_session_path(project_dir))
-        if legacy_payload:
-            for key in ("status", "analysis_targets", "retrieval_progress", "last_run_note", "last_run_at", "updated_at"):
-                if key not in payload and key in legacy_payload:
-                    payload[key] = legacy_payload[key]
-    if not payload and not legacy_payload:
+    if not payload:
         return {}
     return normalize_stage2_manifest(payload)
 
 
 def build_stage2_manifest(
     *,
-    workspace_root: str | Path,
     outputs_root: str | Path,
     project_name: str,
     kanripo_root: str | Path,
@@ -684,43 +732,38 @@ def build_stage2_manifest(
     dotenv_path: str | Path | None = None,
     env_values: dict[str, str] | None = None,
     model_slots: list[dict[str, Any]] | None = None,
-    timing_estimate: dict[str, Any] | None = None,
+    previous_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    workspace = Path(workspace_root).expanduser().resolve()
     outputs = Path(outputs_root).expanduser().resolve()
     project_dir = outputs / project_name
-    stage2_dir = stage2_workspace_dir(project_dir)
     resolved_model_slots = list(model_slots) if model_slots is not None else slot_summaries(
         dotenv_path=dotenv_path,
         env_values=env_values,
     )
-    resolved_timing_estimate = dict(timing_estimate) if timing_estimate is not None else build_stage2_timing_estimate(
-        corpus_overview=corpus_overview,
+    prev = previous_manifest if isinstance(previous_manifest, dict) else None
+    merged_targets = merge_analysis_target_lists(
+        analysis_targets_from_manifest(prev) if prev else [],
+        analysis_targets,
+    )
+    merged_overview = merge_corpus_overview_dicts(prev.get("corpus_overview") if prev else None, corpus_overview)
+    resolved_timing_estimate = build_stage2_timing_estimate(
+        corpus_overview=merged_overview,
         theme_count=len(stage2_context.target_themes),
         model_slots=resolved_model_slots,
+        dotenv_path=dotenv_path,
+        env_values=env_values,
     )
+    preserved_generated = str((prev or {}).get("generated_at") or "").strip()
     return {
         "stage2_manifest_version": 2,
-        "generated_at": _now_iso(),
-        "workspace_root": str(workspace),
-        "outputs_root": str(outputs),
+        "generated_at": preserved_generated or _now_iso(),
         "project_name": project_name,
         "project_dir": str(project_dir),
-        "stage2_workspace_dir": str(stage2_dir),
-        "stage2_manifest_path": str(manifest_path(project_dir)),
         "proposal_path": str(stage2_context.proposal_path),
         "journal_path": str(stage2_context.journal_path) if stage2_context.journal_path else "",
         "research_question": stage2_context.research_question,
         "idea": stage2_context.idea,
-        "theme_source": "stage1_proposal",
         "retrieval_theme_source": stage2_context.retrieval_theme_source,
-        "retrieval_themes": [
-            {
-                "theme": item.theme,
-                "description": item.description,
-            }
-            for item in stage2_context.retrieval_themes
-        ],
         "target_themes": [
             {
                 "theme": item.theme,
@@ -729,12 +772,15 @@ def build_stage2_manifest(
             for item in stage2_context.target_themes
         ],
         "kanripo_root": str(Path(kanripo_root).expanduser().resolve()),
-        "analysis_targets": normalize_analysis_targets(analysis_targets),
-        "corpus_overview": corpus_overview,
-        "model_slots": resolved_model_slots,
+        "analysis_targets": merged_targets,
+        "corpus_overview": merged_overview,
+        "model_slots": _slim_model_slots_for_manifest(resolved_model_slots),
         "timing_estimate": resolved_timing_estimate,
         "status": "configured",
-        "retrieval_progress": reconcile_retrieval_progress(analysis_targets),
+        "retrieval_progress": reconcile_retrieval_progress(
+            merged_targets,
+            progress=(prev.get("retrieval_progress") if prev else None),
+        ),
     }
 
 
@@ -747,8 +793,6 @@ def write_stage2_manifest(project_dir: str | Path, payload: dict[str, Any]) -> P
     path = manifest_path(project_dir)
     content_payload = normalize_stage2_manifest(payload)
     content_payload["updated_at"] = _now_iso()
-    if "stage2_manifest_path" not in content_payload:
-        content_payload["stage2_manifest_path"] = str(path)
     content = json.dumps(content_payload, ensure_ascii=False, indent=2) + "\n"
     path.write_text(content, encoding="utf-8")
     return path

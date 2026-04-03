@@ -5,7 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from runtime.stage2.api_config import STAGE2_MODELS, fallback_payload, resolve_provider_keys, slot_payload, slot_worker_limit
+from runtime.stage2.api_config import (
+    STAGE2_MODELS,
+    fallback_payload,
+    resolve_provider_keys,
+    scaled_slot_worker_limit,
+    slot_payload,
+    slot_worker_limit,
+)
 
 
 class Stage2ApiConfigTests(unittest.TestCase):
@@ -44,6 +51,20 @@ class Stage2ApiConfigTests(unittest.TestCase):
 
         self.assertEqual(payload["max_concurrency"], STAGE2_MODELS["llm3"].max_concurrency)
         self.assertEqual(slot_worker_limit("llm1"), STAGE2_MODELS["llm1"].max_concurrency)
+
+    def test_slot_payload_scales_max_concurrency_with_multiple_keys(self) -> None:
+        payload = slot_payload(
+            "llm1",
+            env_values={"VOLCENGINE_API_KEYS": "key-a,key-b"},
+        )
+        self.assertEqual(payload["max_concurrency"], STAGE2_MODELS["llm1"].max_concurrency * 2)
+
+    def test_scaled_slot_worker_limit_matches_slot_payload(self) -> None:
+        env_values = {"VOLCENGINE_API_KEYS": "x,y,z"}
+        self.assertEqual(
+            scaled_slot_worker_limit("llm2", env_values=env_values),
+            slot_payload("llm2", env_values=env_values)["max_concurrency"],
+        )
 
     def test_fallback_payload_prefers_stage2_specific_openrouter_settings(self) -> None:
         payload = fallback_payload(

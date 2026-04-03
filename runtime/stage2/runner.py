@@ -15,7 +15,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
-from .api_config import STAGE2_RUNTIME_DEFAULTS, fallback_payload, screening_batch_char_limit, slot_payload, slot_worker_limit
+from .api_config import (
+    STAGE2_RUNTIME_DEFAULTS,
+    fallback_payload,
+    scaled_slot_worker_limit,
+    screening_batch_char_limit,
+    slot_payload,
+)
 from .catalog import (
     PAGE_MARKER_PATTERN,
     TECH_COMMENT_PATTERN,
@@ -1808,8 +1814,8 @@ def _selection_from_manifest(manifest: dict[str, Any]) -> AnalysisTargetSelectio
 
 
 def _load_manifest(project_dir: Path) -> dict[str, Any]:
-    payload = read_json(manifest_path(project_dir), default={})
-    if not isinstance(payload, dict) or not payload:
+    payload = load_stage2_manifest(project_dir)
+    if not payload:
         raise Stage2RunnerError(f"缺少 manifest: {manifest_path(project_dir)}")
     return payload
 
@@ -1926,9 +1932,18 @@ def run_stage2_pipeline(
         update_stage2_manifest_checkpoint(project_path, action="reset", note="force rerun")
         completed_targets_before_run = set()
     clients = _build_clients(dotenv_path=dotenv_path)
-    llm1_workers = max(1, int(llm1_workers if llm1_workers is not None else slot_worker_limit("llm1")))
-    llm2_workers = max(1, int(llm2_workers if llm2_workers is not None else slot_worker_limit("llm2")))
-    llm3_workers = max(1, int(llm3_workers if llm3_workers is not None else slot_worker_limit("llm3")))
+    llm1_workers = max(
+        1,
+        int(llm1_workers if llm1_workers is not None else scaled_slot_worker_limit("llm1", dotenv_path=dotenv_path)),
+    )
+    llm2_workers = max(
+        1,
+        int(llm2_workers if llm2_workers is not None else scaled_slot_worker_limit("llm2", dotenv_path=dotenv_path)),
+    )
+    llm3_workers = max(
+        1,
+        int(llm3_workers if llm3_workers is not None else scaled_slot_worker_limit("llm3", dotenv_path=dotenv_path)),
+    )
     _update_manifest_status(project_path, status="running", note="阶段二执行中")
     _emit_progress(
         progress_callback,

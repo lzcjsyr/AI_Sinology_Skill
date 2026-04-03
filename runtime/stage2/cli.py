@@ -485,6 +485,7 @@ def _prompt_analysis_targets(
     default_targets: list[str] | None = None,
     theme_count: int,
     model_slots: list[dict[str, Any]],
+    dotenv_path: Path | None = None,
 ) -> tuple[list[str], dict[str, object], dict[str, Any]]:
     default_value = " ".join(default_targets or []) or None
     print()
@@ -506,6 +507,7 @@ def _prompt_analysis_targets(
             corpus_overview=overview.as_dict(),
             theme_count=theme_count,
             model_slots=model_slots,
+            dotenv_path=dotenv_path,
         )
         _print_corpus_overview(overview, timing_estimate)
         if _confirm("确认以上调研范围无误，并开始阶段二研究吗？", default=True):
@@ -592,7 +594,9 @@ def _emit_summary(
         )
     )
     _print_timing_estimate(payload.get("timing_estimate"))
-    print(_kv("阶段二工作目录", payload["stage2_workspace_dir"], stream=stream))
+    project_dir_raw = payload.get("project_dir")
+    stage2_ws = str(stage2_workspace_dir(Path(project_dir_raw))) if project_dir_raw else ""
+    print(_kv("阶段二工作目录", stage2_ws, stream=stream))
     if manifest_output_path:
         print(_kv("manifest", f"已写入 {manifest_output_path}", stream=stream))
     else:
@@ -818,6 +822,7 @@ def main() -> int:
             corpus_overview=corpus_overview,
             theme_count=theme_count,
             model_slots=model_slots,
+            dotenv_path=resolved_env_file,
         )
         if not args.json:
             _print_corpus_overview(overview, timing_estimate)
@@ -827,10 +832,10 @@ def main() -> int:
             default_targets=analysis_targets_from_manifest(resumed_manifest),
             theme_count=theme_count,
             model_slots=model_slots,
+            dotenv_path=resolved_env_file,
         )
 
     manifest = build_stage2_manifest(
-        workspace_root=WORKSPACE_ROOT,
         outputs_root=outputs_root,
         project_name=project_name,
         kanripo_root=kanripo_root,
@@ -839,7 +844,7 @@ def main() -> int:
         stage2_context=stage2_context,
         dotenv_path=resolved_env_file,
         model_slots=model_slots,
-        timing_estimate=timing_estimate,
+        previous_manifest=resumed_manifest if resumed_manifest else None,
     )
 
     manifest_output_path: Path | None = None

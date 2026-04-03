@@ -92,6 +92,19 @@ def slot_worker_limit(slot: str) -> int:
     return max(1, int(config.max_concurrency))
 
 
+def scaled_slot_worker_limit(
+    slot: str,
+    *,
+    dotenv_path: str | Path | None = None,
+    env_values: dict[str, str] | None = None,
+) -> int:
+    """在 STAGE2_MODELS 的每槽位基准并发上乘以已解析的 API key 个数（至少为 1）。"""
+    base = slot_worker_limit(slot)
+    provider = STAGE2_MODELS[slot].provider
+    _, api_keys = resolve_provider_keys(provider, dotenv_path=dotenv_path, env_values=env_values)
+    return base * max(1, len(api_keys))
+
+
 def _parse_key_pool(value: str | None) -> tuple[str, ...]:
     if value is None:
         return ()
@@ -168,7 +181,7 @@ def slot_payload(
         "api_keys": api_keys,
         "rpm": config.rpm,
         "tpm": config.tpm,
-        "max_concurrency": slot_worker_limit(slot),
+        "max_concurrency": scaled_slot_worker_limit(slot, dotenv_path=dotenv_path, env_values=env_values),
     }
 
 

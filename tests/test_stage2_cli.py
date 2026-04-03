@@ -197,10 +197,10 @@ class Stage2CliTests(unittest.TestCase):
                 "fragment_count": 2400,
                 "batch_count": 1200,
                 "lower_bound_seconds": 240,
-                "upper_bound_seconds": 960,
+                "upper_bound_seconds": 360,
                 "request_seconds": 20,
             },
-            "stage2_workspace_dir": "/tmp/demo/_stage2",
+            "project_dir": "/tmp/outputs/demo",
         }
 
         stdout = io.StringIO()
@@ -215,7 +215,7 @@ class Stage2CliTests(unittest.TestCase):
         self.assertIn("12,117,027", rendered)
         self.assertIn("1,697", rendered)
         self.assertIn("估时 | 主题 3 | 片段 2,400 | 批次 1,200", rendered)
-        self.assertIn("预估耗时 4 分 - 16 分", rendered)
+        self.assertIn("预估耗时 4 分 - 6 分", rendered)
 
     def test_cli_default_runtime_paths_resolve_from_workspace_root(self) -> None:
         self.assertEqual(
@@ -392,18 +392,17 @@ class Stage2CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(Path(payload["workspace_root"]).resolve(), WORKSPACE_ROOT.resolve())
-        self.assertEqual(payload["theme_source"], "stage1_proposal")
+        self.assertTrue(str(payload["project_dir"]).endswith("/outputs/demo"))
         self.assertEqual(payload["retrieval_theme_source"], "stage1_frontmatter")
         self.assertEqual(
-            [item["theme"] for item in payload["retrieval_themes"]],
+            [item["theme"] for item in payload["target_themes"]],
             ["明代祈雨礼制", "祈雨奏疏与诏令"],
         )
         self.assertEqual(payload["analysis_targets"], ["KR3j0160"])
         self.assertEqual(payload["corpus_overview"]["text_char_count"], 4)
         self.assertIn("timing_estimate", payload)
         self.assertEqual(payload["timing_estimate"]["theme_count"], 2)
-        self.assertTrue(all(slot["has_api_key"] for slot in payload["model_slots"]))
+        self.assertTrue(all("api_key_env" not in slot for slot in payload["model_slots"]))
         self.assertEqual(payload["model_slots"][0]["max_concurrency"], slot_worker_limit("llm1"))
 
     def test_cli_run_executes_dual_screening_and_arbitration(self) -> None:
@@ -478,11 +477,12 @@ class Stage2CliTests(unittest.TestCase):
             manifest_text = (project_dir / "_stage2" / "manifest.json").read_text(encoding="utf-8")
             self.assertIn('"status": "completed"', manifest_text)
             self.assertIn('"current_target": ""', manifest_text)
-            self.assertIn("[stage2] 开始执行", stdout.getvalue())
-            self.assertIn("[stage2] KR4c0001 llm1 粗筛进度", stdout.getvalue())
-            self.assertIn("[stage2] KR4c0001 候选主题就绪", stdout.getvalue())
-            self.assertIn("[stage2] KR4c0001 llm1 精筛进度", stdout.getvalue())
-            self.assertIn("[stage2] 完成目标 KR4c0001", stdout.getvalue())
+            out = stdout.getvalue()
+            self.assertIn("阶段二配置", out)
+            self.assertIn("模型1 粗筛", out)
+            self.assertIn("候选主题", out)
+            self.assertIn("模型1 精筛", out)
+            self.assertIn("KR4c0001 完成", out)
             self.assertIn("阶段二执行完成", stdout.getvalue())
 
     def test_run_stage2_pipeline_merges_project_primary_corpus_across_multiple_runs(self) -> None:
