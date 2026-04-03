@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from runtime.stage2.api_config import screening_batch_char_limit, slot_worker_limit
 from runtime.stage2.cli import WORKSPACE_ROOT, _emit_summary, _resolve_runtime_path, main
+from runtime.stage2.io_utils import read_jsonl
 from runtime.stage2.runner import Fragment, Stage2FormatError, _build_batches, run_stage2_pipeline
 
 
@@ -698,18 +699,16 @@ class Stage2CliTests(unittest.TestCase):
         with patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=fallback_chat_json):
             summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
 
-        coarse_rows = [
-            json.loads(line)
-            for line in (project_dir / "_stage2" / "targets" / "KR4c0001" / "llm1_coarse_screening.jsonl").read_text(
-                encoding="utf-8"
-            ).splitlines()
-            if line.strip()
-        ]
+        coarse_rows = read_jsonl(project_dir / "_stage2" / "targets" / "KR4c0001" / "llm1_coarse_screening.jsonl")
         self.assertEqual(summary["piece_count"], 1)
         self.assertEqual(len(coarse_rows), 1)
-        self.assertTrue(coarse_rows[0]["used_format_fallback"])
-        self.assertEqual(coarse_rows[0]["provider"], "openrouter")
-        self.assertEqual(coarse_rows[0]["model"], "anthropic/claude-sonnet-4.6")
+        for key in ("slot", "model", "provider", "generated_at", "used_format_fallback"):
+            self.assertNotIn(key, coarse_rows[0])
+        usage = coarse_rows[0].get("usage") or {}
+        self.assertNotIn("prompt_tokens_details", usage)
+        self.assertNotIn("completion_tokens_details", usage)
+        self.assertEqual(usage.get("total_tokens"), 12)
+        self.assertIn("themes", coarse_rows[0])
 
     def test_run_stage2_pipeline_records_manual_review_when_fallback_is_exhausted(self) -> None:
         root, project_dir = self._prepare_stage2_demo()
@@ -724,17 +723,9 @@ class Stage2CliTests(unittest.TestCase):
             summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
 
         target_dir = project_dir / "_stage2" / "targets" / "KR4c0001"
-        manual_review_rows = [
-            json.loads(line)
-            for line in (target_dir / "manual_review_queue.jsonl").read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        manual_review_rows = read_jsonl(target_dir / "manual_review_queue.jsonl")
         manual_review_report = (target_dir / "MANUAL_REVIEW_REQUIRED.md").read_text(encoding="utf-8")
-        final_rows = [
-            json.loads(line)
-            for line in (target_dir / "final_records.jsonl").read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        final_rows = read_jsonl(target_dir / "final_records.jsonl")
 
         self.assertEqual(summary["piece_count"], 1)
         self.assertEqual(summary["targets"][0]["manual_review_count"], 1)

@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from runtime.stage2.rate_control import RateControllerRegistry, estimate_request_tokens
+from runtime.stage2.api_config import RateControllerRegistry, estimate_request_tokens
 from runtime.stage2.runner import OpenAICompatClient
 
 

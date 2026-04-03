@@ -10,6 +10,7 @@ from typing import Any
 
 from .api_config import STAGE2_MODELS, merged_env, slot_payload
 from .catalog import catalog_root, list_available_scope_dirs, list_available_scope_options
+from .prompts import FORMAT_STRICT_SYSTEM, FORMAT_STRICT_USER
 from .session import slot_summaries
 
 
@@ -62,8 +63,8 @@ def api_smoke_test(slot: str, *, env_file: str | Path | None = None) -> dict[str
     response = completion(
         model=payload["model"],
         messages=[
-            {"role": "system", "content": "你是一个严格遵守格式的助手。"},
-            {"role": "user", "content": "请只返回一个极短 JSON：{\"ok\":true}"},
+            {"role": "system", "content": FORMAT_STRICT_SYSTEM},
+            {"role": "user", "content": FORMAT_STRICT_USER},
         ],
         temperature=0.0,
         custom_llm_provider="openai",

@@ -16,7 +16,10 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .api_config import (
+    RateControllerRegistry,
     STAGE2_RUNTIME_DEFAULTS,
+    SlotRateController,
+    estimate_request_tokens,
     fallback_payload,
     scaled_slot_worker_limit,
     screening_batch_char_limit,
@@ -30,8 +33,22 @@ from .catalog import (
     resolve_analysis_targets,
     text_files_for_repo_dir,
 )
-from .io_utils import append_jsonl, read_json, read_jsonl, write_json, write_jsonl, write_yaml
-from .rate_control import RateControllerRegistry, SlotRateController, estimate_request_tokens
+from .io_utils import read_json, read_jsonl, write_json, write_jsonl, write_yaml
+from .prompts import (
+    ARBITRATION_LLM1_LABEL,
+    ARBITRATION_LLM2_LABEL,
+    ARBITRATION_ORIGINAL_LABEL,
+    ARBITRATION_SYSTEM,
+    ARBITRATION_TASK,
+    ARBITRATION_THEME_LABEL,
+    COARSE_SYSTEM,
+    COARSE_USER_INSTRUCTION,
+    COARSE_USER_LEAD,
+    SOURCE_FILE_LABEL,
+    TARGETED_SYSTEM,
+    TARGETED_USER_INSTRUCTION,
+    TARGETED_USER_THEME_LABEL,
+)
 from .session import (
     analysis_targets_from_manifest,
     load_stage2_manifest,
@@ -472,26 +489,13 @@ def _coarse_screening_messages(
         theme_lines.append(f"T{index}: {theme}{detail}")
     themes_block = "\n".join(theme_lines)
     return [
-        {
-            "role": "system",
-            "content": (
-                "你是严谨的古籍批次级初筛助手。"
-                "你必须只返回一个合法 JSON 对象，不得输出任何额外文字。"
-                '格式必须是 {"themes":[{"theme":"...","is_relevant":true}]}。'
-                "规则：1) themes 必须覆盖全部输入主题，theme 文本必须与输入完全一致。"
-                "2) 这里是初筛，只判断这整段正文是否可能与某主题相关，相对宽松，宁滥勿缺。"
-                "3) 只要该批次中可能存在相关 fragment，就返回 true。"
-                "4) 不要输出理由，不要输出 piece_id。"
-            ),
-        },
+        {"role": "system", "content": COARSE_SYSTEM},
         {
             "role": "user",
             "content": (
-                "研究主题如下：\n"
-                f"{themes_block}\n\n"
-                f"文献来源：{batch.source_file}\n"
-                "请判断以下整段正文对各主题是否可能相关：\n"
-                f"{batch.batch_text}"
+                f"{COARSE_USER_LEAD}{themes_block}\n\n"
+                f"{SOURCE_FILE_LABEL}{batch.source_file}\n"
+                f"{COARSE_USER_INSTRUCTION}{batch.batch_text}"
             ),
         },
     ]
@@ -510,26 +514,13 @@ def _targeted_screening_messages(
             continue
         fragment_lines.append(f"### {piece_id}\n{fragment.original_text}")
     return [
-        {
-            "role": "system",
-            "content": (
-                "你是严谨的古籍单主题精筛助手。"
-                "你必须只返回一个合法 JSON 对象，不得输出任何额外文字。"
-                '格式必须是 {"results":[{"piece_id":"...","is_relevant":true,"reason":"..."}]}。'
-                "规则：1) results 必须覆盖全部输入 piece_id，每个 piece_id 必须且只出现一次。"
-                "2) 当前只判断一个主题，不要输出其他主题。"
-                "3) is_relevant 为 true 表示该 fragment 对当前主题存在直接证据、关键线索或高度相关表达。"
-                '4) is_relevant 为 false 时，reason 必须写 "NA"。'
-                "5) is_relevant 为 true 时，reason 必须是简短中文理由。"
-            ),
-        },
+        {"role": "system", "content": TARGETED_SYSTEM},
         {
             "role": "user",
             "content": (
-                f"当前主题：{theme}\n\n"
-                f"文献来源：{batch.source_file}\n"
-                "请逐条判断以下 fragment：\n"
-                f"{'\n\n'.join(fragment_lines)}"
+                f"{TARGETED_USER_THEME_LABEL}{theme}\n\n"
+                f"{SOURCE_FILE_LABEL}{batch.source_file}\n"
+                f"{TARGETED_USER_INSTRUCTION}{'\n\n'.join(fragment_lines)}"
             ),
         },
     ]
@@ -543,23 +534,15 @@ def _arbitration_messages(
     llm2_result: dict[str, Any],
 ) -> list[dict[str, str]]:
     return [
-        {
-            "role": "system",
-            "content": (
-                "你是第三方学术仲裁助手。"
-                "你必须只返回一个合法 JSON 对象，不得输出额外解释。"
-                '格式必须是 {"is_relevant":true,"reason":"..."}。'
-                "reason 必须为非空中文短句。"
-            ),
-        },
+        {"role": "system", "content": ARBITRATION_SYSTEM},
         {
             "role": "user",
             "content": (
-                f"研究主题：{theme}\n\n"
-                f"原文：\n{original_text}\n\n"
-                f"LLM1 判定：{json.dumps(llm1_result, ensure_ascii=False)}\n"
-                f"LLM2 判定：{json.dumps(llm2_result, ensure_ascii=False)}\n\n"
-                "请判断这条史料对该主题是否应保留。"
+                f"{ARBITRATION_THEME_LABEL}{theme}\n\n"
+                f"{ARBITRATION_ORIGINAL_LABEL}{original_text}\n\n"
+                f"{ARBITRATION_LLM1_LABEL}{json.dumps(llm1_result, ensure_ascii=False)}\n"
+                f"{ARBITRATION_LLM2_LABEL}{json.dumps(llm2_result, ensure_ascii=False)}\n\n"
+                f"{ARBITRATION_TASK}"
             ),
         },
     ]
@@ -643,6 +626,16 @@ def _normalize_targeted_screening_payload(
     return normalized
 
 
+def _compact_usage_stats(usage: dict[str, Any]) -> dict[str, Any]:
+    """保留 completion/prompt/total 等汇总字段，去掉各平台附带的 *_tokens_details 嵌套。"""
+    if not isinstance(usage, dict):
+        return {}
+    out = dict(usage)
+    out.pop("prompt_tokens_details", None)
+    out.pop("completion_tokens_details", None)
+    return out
+
+
 def _screen_batch_coarse(
     *,
     client: OpenAICompatClient,
@@ -656,16 +649,11 @@ def _screen_batch_coarse(
             max_tokens=400,
         )
         return {
-            "slot": slot,
-            "model": active_client.model,
-            "provider": active_client.provider,
             "batch_id": batch.batch_id,
             "source_file": batch.source_file,
             "repo_dir": batch.repo_dir,
             "themes": _normalize_coarse_screening_payload(payload, target_themes=target_themes),
-            "usage": usage,
-            "generated_at": _now_iso(),
-            "used_format_fallback": active_client is not client,
+            "usage": _compact_usage_stats(usage),
         }
 
     try:
@@ -673,7 +661,6 @@ def _screen_batch_coarse(
     except Stage2FallbackExhaustedError as exc:
         return _coarse_manual_review_row(
             client=client,
-            slot=slot,
             batch=batch,
             target_themes=target_themes,
             exc=exc,
@@ -693,12 +680,9 @@ def _screen_batch_targeted(
     def invoke(active_client: OpenAICompatClient) -> dict[str, Any]:
         payload, usage = active_client.chat_json(
             messages=_targeted_screening_messages(theme=theme, batch=batch, fragment_map=fragment_map),
-            max_tokens=1200,
+            max_tokens=5000,
         )
         return {
-            "slot": slot,
-            "model": active_client.model,
-            "provider": active_client.provider,
             "batch_id": batch.batch_id,
             "batch_theme_key": f"{batch.batch_id}::{theme}",
             "matched_theme": theme,
@@ -706,17 +690,13 @@ def _screen_batch_targeted(
             "repo_dir": batch.repo_dir,
             "piece_ids": list(batch.piece_ids),
             "results": _normalize_targeted_screening_payload(payload, batch=batch),
-            "usage": usage,
-            "generated_at": _now_iso(),
-            "used_format_fallback": active_client is not client,
+            "usage": _compact_usage_stats(usage),
         }
 
     try:
         return _run_with_format_fallback(client=client, invoke=invoke)
     except Stage2FallbackExhaustedError as exc:
         return _targeted_manual_review_row(
-            client=client,
-            slot=slot,
             batch=batch,
             theme=theme,
             exc=exc,
@@ -837,23 +817,17 @@ def _manual_review_reason(exc: Stage2FallbackExhaustedError) -> str:
 def _coarse_manual_review_row(
     *,
     client: OpenAICompatClient,
-    slot: str,
     batch: Batch,
     target_themes: list[dict[str, str]],
     exc: Stage2FallbackExhaustedError,
 ) -> dict[str, Any]:
     fallback_client = client.fallback_client
     return {
-        "slot": slot,
-        "model": fallback_client.model if fallback_client is not None else client.model,
-        "provider": fallback_client.provider if fallback_client is not None else client.provider,
         "batch_id": batch.batch_id,
         "source_file": batch.source_file,
         "repo_dir": batch.repo_dir,
         "themes": [{"theme": theme, "is_relevant": True} for theme in _theme_names(target_themes)],
         "usage": {},
-        "generated_at": _now_iso(),
-        "used_format_fallback": True,
         "needs_manual_review": True,
         "manual_review_stage": "coarse",
         "manual_review_key": batch.batch_id,
@@ -866,17 +840,11 @@ def _coarse_manual_review_row(
 
 def _targeted_manual_review_row(
     *,
-    client: OpenAICompatClient,
-    slot: str,
     batch: Batch,
     theme: str,
     exc: Stage2FallbackExhaustedError,
 ) -> dict[str, Any]:
-    fallback_client = client.fallback_client
     return {
-        "slot": slot,
-        "model": fallback_client.model if fallback_client is not None else client.model,
-        "provider": fallback_client.provider if fallback_client is not None else client.provider,
         "batch_id": batch.batch_id,
         "batch_theme_key": f"{batch.batch_id}::{theme}",
         "matched_theme": theme,
@@ -892,8 +860,6 @@ def _targeted_manual_review_row(
             for piece_id in batch.piece_ids
         ],
         "usage": {},
-        "generated_at": _now_iso(),
-        "used_format_fallback": True,
         "needs_manual_review": True,
         "manual_review_stage": "targeted",
         "manual_review_key": f"{batch.batch_id}::{theme}",
@@ -938,15 +904,17 @@ def _manual_review_entries_from_row(
     *,
     row: dict[str, Any],
     fragment_map: dict[str, Fragment],
+    slot: str | None = None,
 ) -> list[dict[str, Any]]:
     if not bool(row.get("needs_manual_review")):
         return []
 
     stage = str(row.get("manual_review_stage") or "")
     generated_at = str(row.get("generated_at") or _now_iso())
+    resolved_slot = slot if slot is not None else str(row.get("slot") or "")
     base = {
         "manual_review_stage": stage,
-        "slot": str(row.get("slot") or ""),
+        "slot": resolved_slot,
         "batch_id": str(row.get("batch_id") or ""),
         "manual_review_reason": str(row.get("manual_review_reason") or ""),
         "primary_error": str(row.get("primary_error") or ""),
@@ -1054,12 +1022,21 @@ def _render_manual_review_report(target_dir: Path) -> None:
     _manual_review_report_path(target_dir).write_text("\n".join(lines), encoding="utf-8")
 
 
-def _append_manual_review_entries(target_dir: Path, row: dict[str, Any], fragment_map: dict[str, Fragment]) -> None:
-    entries = _manual_review_entries_from_row(row=row, fragment_map=fragment_map)
-    for entry in entries:
-        append_jsonl(_manual_review_path(target_dir), entry)
-    if entries:
-        _render_manual_review_report(target_dir)
+def _append_manual_review_entries(
+    target_dir: Path,
+    row: dict[str, Any],
+    fragment_map: dict[str, Fragment],
+    *,
+    slot: str | None = None,
+) -> None:
+    entries = _manual_review_entries_from_row(row=row, fragment_map=fragment_map, slot=slot)
+    if not entries:
+        return
+    manual_path = _manual_review_path(target_dir)
+    combined = read_jsonl(manual_path)
+    combined.extend(entries)
+    write_jsonl(manual_path, combined)
+    _render_manual_review_report(target_dir)
 
 
 def _target_workspace_dir(project_dir: Path, token: str) -> Path:
@@ -1329,9 +1306,9 @@ def _run_coarse_batches(
             ),
         ):
             row = future.result()
-            append_jsonl(output_path, row)
-            _append_manual_review_entries(target_dir, row, fragment_map)
             cached[batch.batch_id] = row
+            write_jsonl(output_path, [cached[b.batch_id] for b in batches if b.batch_id in cached])
+            _append_manual_review_entries(target_dir, row, fragment_map, slot=slot)
             finished_count += 1
             _update_target_state(
                 target_dir,
@@ -1448,7 +1425,7 @@ def _run_targeted_pairs(
                     batch=batch_map[str(pair["batch_id"])],
                     fragment_map=fragment_map,
                 ),
-                max_tokens=1200,
+                max_tokens=5000,
             )
             for pair in pending_pairs
         ),
@@ -1478,9 +1455,13 @@ def _run_targeted_pairs(
             ),
         ):
             row = future.result()
-            append_jsonl(output_path, row)
-            _append_manual_review_entries(target_dir, row, fragment_map)
-            cached[str(pair["batch_theme_key"])] = row
+            key = str(pair["batch_theme_key"])
+            cached[key] = row
+            write_jsonl(
+                output_path,
+                [cached[str(p["batch_theme_key"])] for p in candidate_pairs if str(p["batch_theme_key"]) in cached],
+            )
+            _append_manual_review_entries(target_dir, row, fragment_map, slot=slot)
             finished_count += 1
             _update_target_state(
                 target_dir,
@@ -1511,12 +1492,16 @@ def _run_targeted_pairs(
     return [cached[str(pair["batch_theme_key"])] for pair in candidate_pairs if str(pair["batch_theme_key"]) in cached]
 
 
-def _flatten_targeted_rows(slot_rows: list[dict[str, Any]], fragment_map: dict[str, Fragment]) -> dict[tuple[str, str], dict[str, Any]]:
+def _flatten_targeted_rows(
+    slot_rows: list[dict[str, Any]],
+    fragment_map: dict[str, Fragment],
+    *,
+    slot: str,
+    model: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
     flattened: dict[tuple[str, str], dict[str, Any]] = {}
     for row in slot_rows:
         batch_id = str(row.get("batch_id") or "")
-        slot = str(row.get("slot") or "")
-        model = str(row.get("model") or "")
         theme = str(row.get("matched_theme") or "").strip()
         if not theme:
             continue
@@ -1532,8 +1517,8 @@ def _flatten_targeted_rows(slot_rows: list[dict[str, Any]], fragment_map: dict[s
                 "matched_theme": theme,
                 "is_relevant": bool(piece_result.get("is_relevant")),
                 "reason": str(piece_result.get("reason") or "").strip(),
-                "slot": slot,
-                "model": model,
+                "slot": str(slot),
+                "model": str(model),
                 "batch_id": batch_id,
                 "needs_manual_review": bool(row.get("needs_manual_review")) or str(piece_result.get("reason") or "") == MANUAL_REVIEW_REQUIRED_REASON,
                 "manual_review_reason": str(row.get("manual_review_reason") or "").strip(),
@@ -1680,9 +1665,12 @@ def _run_arbitration(
                 ),
             ):
                 row = future.result()
-                append_jsonl(output_path, row)
-                _append_manual_review_entries(target_dir, row, fragment_map)
                 cached[dispute["dispute_key"]] = row
+                write_jsonl(
+                    output_path,
+                    [cached[d["dispute_key"]] for d in disputes if d["dispute_key"] in cached],
+                )
+                _append_manual_review_entries(target_dir, row, fragment_map, slot="llm3")
                 resolved_count += 1
                 _update_target_state(
                     target_dir,
@@ -2104,8 +2092,18 @@ def run_stage2_pipeline(
                 progress_callback=progress_callback,
             )
 
-            llm1_map = _flatten_targeted_rows(llm1_rows, fragment_map)
-            llm2_map = _flatten_targeted_rows(llm2_rows, fragment_map)
+            llm1_map = _flatten_targeted_rows(
+                llm1_rows,
+                fragment_map,
+                slot="llm1",
+                model=str(clients["llm1"].model),
+            )
+            llm2_map = _flatten_targeted_rows(
+                llm2_rows,
+                fragment_map,
+                slot="llm2",
+                model=str(clients["llm2"].model),
+            )
             consensus, disputes = _build_consensus_and_disputes(llm1_map=llm1_map, llm2_map=llm2_map)
             write_json(_consensus_path(target_dir), {"records": consensus})
             disputes_path = _write_disputes(target_dir, disputes)
