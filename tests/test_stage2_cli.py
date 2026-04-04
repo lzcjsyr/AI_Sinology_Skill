@@ -15,10 +15,38 @@ from unittest.mock import patch
 from runtime.stage2.api_config import screening_batch_char_limit, slot_worker_limit
 from runtime.stage2.cli import WORKSPACE_ROOT, _emit_summary, _resolve_runtime_path, main
 from runtime.stage2.io_utils import read_jsonl
-from runtime.stage2.runner import Fragment, Stage2FormatError, _build_batches, run_stage2_pipeline
+from runtime.stage2.runner import (
+    Fragment,
+    Stage2FormatError,
+    _build_batches,
+    _normalize_coarse_screening_payload,
+    _normalize_targeted_screening_payload,
+    run_stage2_pipeline,
+)
 
 
 class Stage2CliTests(unittest.TestCase):
+    @staticmethod
+    def _targeted_batch() -> object:
+        return _build_batches(
+            [
+                Fragment(
+                    piece_id="pb:1",
+                    source_file="测试文献",
+                    original_text="甲",
+                    repo_dir="KR4c0001",
+                    text_file="KR4c0001_000.txt",
+                ),
+                Fragment(
+                    piece_id="pb:2",
+                    source_file="测试文献",
+                    original_text="乙",
+                    repo_dir="KR4c0001",
+                    text_file="KR4c0001_000.txt",
+                ),
+            ]
+        )[0]
+
     @staticmethod
     def _fake_chat_json(self, *, messages, max_tokens=4000, temperature=0.0):  # noqa: ANN001
         system_text = messages[0]["content"]
@@ -29,17 +57,9 @@ class Stage2CliTests(unittest.TestCase):
             return {"is_relevant": False, "reason": "以免误收，判为不保留"}, {"total_tokens": 10}
 
         if "批次级初筛助手" in system_text:
-            theme_names = [item.strip() for item in re.findall(r"^T\d+:\s+([^\n|]+)", user_text, re.MULTILINE)]
+            theme_names = [item.strip() for item in re.findall(r"^\d+:\s+([^\n]+)$", user_text, re.MULTILINE)]
             return (
-                {
-                    "themes": [
-                        {
-                            "theme": theme,
-                            "is_relevant": "冬雷" in theme and "冬雷" in user_text,
-                        }
-                        for theme in theme_names
-                    ]
-                },
+                {str(index): ("T" if "冬雷" in theme and "冬雷" in user_text else "F") for index, theme in enumerate(theme_names, start=1)},
                 {"total_tokens": 12},
             )
 
@@ -49,20 +69,20 @@ class Stage2CliTests(unittest.TestCase):
             for piece_id in piece_ids:
                 if self.slot == "llm1":
                     is_relevant = piece_id.endswith("1a")
-                    reason = "出现冬雷题咏线索" if is_relevant else "NA"
+                    reason = "出现冬雷题咏线索"
                 elif self.slot == "llm2":
                     is_relevant = True
-                    reason = "可能关联冬雷主题" if is_relevant else "NA"
+                    reason = "可能关联冬雷主题"
                 else:
                     is_relevant = False
-                    reason = "NA"
-                results.append(
-                    {
-                        "piece_id": piece_id,
-                        "is_relevant": is_relevant,
-                        "reason": reason,
-                    }
-                )
+                    reason = ""
+                if is_relevant:
+                    results.append(
+                        {
+                            "piece_id": piece_id,
+                            "reason": reason,
+                        }
+                    )
             return {"results": results}, {"total_tokens": 20}
 
         raise AssertionError(f"unexpected prompt: {system_text}")
@@ -184,6 +204,78 @@ class Stage2CliTests(unittest.TestCase):
         self.assertEqual(list(batches[0].piece_ids), ["pb:1"])
         self.assertEqual(list(batches[1].piece_ids), ["pb:2"])
 
+    def test_normalize_coarse_screening_payload_accepts_flat_index_map(self) -> None:
+        rows = _normalize_coarse_screening_payload(
+            {"1": "T", "2": "F"},
+            target_themes=[
+                {"theme": "唐宋冬雷题咏"},
+                {"theme": "春风池馆书写"},
+            ],
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"theme": "唐宋冬雷题咏", "is_relevant": True},
+                {"theme": "春风池馆书写", "is_relevant": False},
+            ],
+        )
+
+    def test_normalize_coarse_screening_payload_keeps_legacy_list_compatible(self) -> None:
+        rows = _normalize_coarse_screening_payload(
+            {
+                "themes": [
+                    {"theme": "唐宋冬雷题咏", "is_relevant": True},
+                    {"theme_id": "2", "is_relevant": "F"},
+                ]
+            },
+            target_themes=[
+                {"theme": "唐宋冬雷题咏"},
+                {"theme": "春风池馆书写"},
+            ],
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"theme": "唐宋冬雷题咏", "is_relevant": True},
+                {"theme": "春风池馆书写", "is_relevant": False},
+            ],
+        )
+
+    def test_normalize_targeted_screening_payload_fills_missing_negatives(self) -> None:
+        rows = _normalize_targeted_screening_payload(
+            {"results": [{"piece_id": "pb:1", "reason": "出现冬雷题咏线索"}]},
+            batch=self._targeted_batch(),
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"piece_id": "pb:1", "is_relevant": True, "reason": "出现冬雷题咏线索"},
+                {"piece_id": "pb:2", "is_relevant": False, "reason": "NA"},
+            ],
+        )
+
+    def test_normalize_targeted_screening_payload_accepts_legacy_false_rows(self) -> None:
+        rows = _normalize_targeted_screening_payload(
+            {
+                "results": [
+                    {"piece_id": "pb:1", "is_relevant": True, "reason": "出现冬雷题咏线索"},
+                    {"piece_id": "pb:2", "is_relevant": False, "reason": "NA"},
+                ]
+            },
+            batch=self._targeted_batch(),
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                {"piece_id": "pb:1", "is_relevant": True, "reason": "出现冬雷题咏线索"},
+                {"piece_id": "pb:2", "is_relevant": False, "reason": "NA"},
+            ],
+        )
+
     def test_emit_summary_formats_large_counts_and_timing_estimate(self) -> None:
         manifest = {
             "project_name": "demo",
@@ -273,6 +365,8 @@ class Stage2CliTests(unittest.TestCase):
                 if "批次级初筛助手" in system_text:
                     seen_coarse_user_text.append(user_text)
                     if "###" in user_text or "piece_id" in user_text or "repo_dir" in user_text:
+                        raise AssertionError(user_text)
+                    if not re.search(r"^1:\s+", user_text, re.MULTILINE):
                         raise AssertionError(user_text)
                 return Stage2CliTests._fake_chat_json(self, messages=messages, max_tokens=max_tokens, temperature=temperature)
 

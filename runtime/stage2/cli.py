@@ -308,11 +308,11 @@ def _hr(*, stream: Any = sys.stdout, width: int = 52) -> None:
     print(_muted("─" * width, stream=stream), file=stream)
 
 
-def _theme_line_for_cli(item: ThemeItem) -> str:
+def _theme_line_for_cli(item: ThemeItem, index: int) -> str:
     desc = (item.description or "").strip()
     if desc and desc not in _THEME_DESC_BOILERPLATE:
-        return f"{item.theme} · {desc}"
-    return item.theme
+        return f"{index}. {item.theme} · {desc}"
+    return f"{index}. {item.theme}"
 
 
 def _print_intro(
@@ -372,8 +372,8 @@ def _print_intro(
     )
     _soft_section_break(stream=stream)
     print(_label(f"{theme_title}:", stream=stream), file=stream)
-    for item in stage2_context.retrieval_themes:
-        print(_bullet(_theme_line_for_cli(item), stream=stream))
+    for index, item in enumerate(stage2_context.retrieval_themes, start=1):
+        print(_bullet(_theme_line_for_cli(item, index), stream=stream))
 
 
 def _print_selection_errors(issues: tuple[Any, ...]) -> None:

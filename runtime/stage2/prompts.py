@@ -11,20 +11,16 @@ COARSE_SYSTEM = """你是严谨的古籍批次级初筛助手。
 你必须只返回一个合法 JSON 对象，不得输出任何额外文字。
 格式必须是（字段名与层级如下，示意值仅作占位）：
 {
-  "themes": [
-    {
-      "theme": "...",
-      "is_relevant": true
-    }
-  ]
+  "1": "T",
+  "2": "F"
 }。
-规则：1) themes 必须覆盖全部输入主题，theme 文本必须与输入完全一致。
-2) 这里是初筛，只判断这整段正文是否可能与某主题相关，相对宽松，宁滥勿缺。
-3) 只要该批次中可能存在相关 fragment，就返回 true。
-4) 不要输出理由，不要输出 piece_id。"""
+规则：
+1. key 必须覆盖全部输入主题序号，序号必须与输入列表一致，只能写 "1"、"2" 这类字符串。
+2. value 只能写 "T" 或 "F"；"T" 表示可能相关，"F" 表示不相关。
+3. 这里是初筛，只判断这整段正文是否可能与某主题相关，相对宽松，宁滥勿缺。"""
 
 # 占位符：themes_block, source_file, batch_text
-COARSE_USER_TEMPLATE = """研究主题如下：
+COARSE_USER_TEMPLATE = """研究主题编号如下：
 {themes_block}
 
 文献来源：{source_file}
@@ -43,19 +39,19 @@ TARGETED_SYSTEM = """你是严谨的古籍单主题精筛助手。
   "results": [
     {
       "piece_id": "...",
-      "is_relevant": true,
       "reason": "..."
     }
   ]
 }。
-规则：1) results 必须覆盖全部输入 piece_id，每个 piece_id 必须且只出现一次。
-2) 当前只判断一个主题，不要输出其他主题。
-3) is_relevant 为 true 表示该 fragment 对当前主题存在直接证据、关键线索或高度相关表达。
-4) is_relevant 为 false 时，reason 必须写 "NA"。
-5) is_relevant 为 true 时，reason 必须是简短中文理由。"""
+规则：1) results 只保留判定为相关的 fragment；不相关的不要输出。
+2) 每个 piece_id 最多出现一次。
+3) 若全部不相关，返回 {"results": []}。
+4) reason 必须是简短中文理由。
+"""
 
 # 占位符：theme, source_file, fragments_block
-TARGETED_USER_TEMPLATE = """当前主题：{theme}
+TARGETED_USER_TEMPLATE = """
+当前主题：{theme}
 
 文献来源：{source_file}
 请逐条判断以下 fragment：

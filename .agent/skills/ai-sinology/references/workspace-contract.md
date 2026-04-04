@@ -51,6 +51,7 @@ Skill 在每次推进阶段后都应同步更新这个文件。
   - `stage2_retrieval_themes`
 - 如果用户起初没有说明投稿目标，Skill 应先追问；如果目标期刊不在内置期刊介绍内，Skill 应优先要求用户提供期刊网页并据此提炼要求，只有网页拿不到时才补问期刊级别、文章样式、篇幅与体例等信息。
 - `stage2_retrieval_themes` 推荐写成 YAML 列表，给出 2 到 5 个可直接供阶段二执行的检索主题。
+- 如需在正文展示这些主题，应用 `1. ...`、`2. ...` 这样的有序列表；但 YAML front matter 中的 `stage2_retrieval_themes` 仍保持纯主题文本，不把编号写进值本身。
 
 ### 阶段二
 
@@ -58,6 +59,7 @@ Skill 在每次推进阶段后都应同步更新这个文件。
 - 启动阶段二前，应先确认 `1_journal_targeting.md` 与 `1_research_proposal.md` 两个阶段一正式文件都已生成。
 - 阶段二只负责原始文献勘查与一手灵感积累，不与二手学术史混写。
 - 阶段二默认直接读取阶段一文件，优先读取 `stage2_retrieval_themes`，没有时才回退到研究方向与 idea 的兜底推断；不等待后置 scholarship map。
+- 阶段二粗筛为了节省 token，只要求模型返回类似 `{"1":"T","2":"F"}` 的扁平 JSON；运行时必须按阶段一主题顺序把序号还原为完整主题，再继续精筛、仲裁与最终 `matched_theme` 写回。
 - 由 Skill 外部运行时生成；Skill 只约束写回契约。
 - 推荐同时提供：`outputs/<project>/_stage2/manifest.json`
 - 推荐同时保留：`outputs/<project>/_stage2/session.json`

@@ -14,7 +14,7 @@
 ## 当前工作流
 
 1. 用 `$ai-sinology` 或 `python3 .agent/skills/ai-sinology/scripts/init_project.py <project>` 创建 `outputs/<project>/` 和 `project_progress.yaml`
-2. 完成阶段一，生成 `1_journal_targeting.md` 与 `1_research_proposal.md`；建议在 front matter 中显式写入 `stage2_retrieval_themes`
+2. 完成阶段一，生成 `1_journal_targeting.md` 与 `1_research_proposal.md`；建议在 front matter 中显式写入 `stage2_retrieval_themes`，并在正文解释这些主题时使用带序号的列表（如 `1. ...`、`2. ...`）
 3. 运行 `python3 -m runtime.stage2.cli`，从阶段一输入出发读取检索主题并确认阶段二原始文献检索范围，生成：
    - `outputs/<project>/_stage2/manifest.json`
 4. 运行阶段二 CLI，直接执行 Kanripo 原始文献勘查，并写回 `outputs/<project>/2_primary_corpus.yaml`
@@ -113,7 +113,8 @@ pytest
 默认交互模式下，阶段二在确认 `analysis_targets` 后会直接开始执行；只有显式使用 `--setup-only` 时，才只写入 manifest 状态文件、不进入筛读。执行阶段会进一步完成：
 
 - 解析 `analysis_targets` 对应的 Kanripo 正文分页，写入 `_stage2/targets/<target>/fragments.jsonl`
-- 按批次将正文送入 `llm1` 与 `llm2` 独立筛读，分别保存 `llm1_screening.jsonl` 与 `llm2_screening.jsonl`
+- 按批次将正文送入 `llm1` 与 `llm2` 独立筛读；粗筛阶段对主题只传递序号，并要求模型返回类似 `{"1":"T","2":"F"}` 的扁平 JSON，运行时再按阶段一主题顺序还原为完整主题名
+- 对粗筛命中的批次继续做单主题精筛；模型只输出判定相关的 `piece_id` 与理由，运行时自动把未返回的 fragment 视为不相关，并分别保存 `llm1_screening.jsonl` 与 `llm2_screening.jsonl`
 - 对双模型分歧样本调用 `llm3` 仲裁，保存 `llm3_arbitration.jsonl`
 - 为人工复核保留 `consensus_records.json`、`disputes.json`、`final_records.jsonl`，并在 `run_state.json` 中维护目标级摘要
 - 成功后统一写回 `outputs/<project>/2_primary_corpus.yaml`

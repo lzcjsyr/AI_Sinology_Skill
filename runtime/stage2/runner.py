@@ -54,6 +54,7 @@ from .session import (
 
 TITLE_PATTERN = re.compile(r"^#\+TITLE:\s*(.+)$", re.MULTILINE)
 CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+COARSE_THEME_KEY_PATTERN = re.compile(r"^(?:T)?(\d+)$", re.IGNORECASE)
 FRAGMENT_FILE_NAME = "fragments.jsonl"
 BATCH_FILE_NAME = "batches.jsonl"
 LLM1_COARSE_FILE_NAME = "llm1_coarse_screening.jsonl"
@@ -299,6 +300,55 @@ def _theme_names(target_themes: list[dict[str, str]]) -> list[str]:
     return [str(item.get("theme") or "").strip() for item in target_themes if str(item.get("theme") or "").strip()]
 
 
+def _theme_specs(target_themes: list[dict[str, str]]) -> list[dict[str, str]]:
+    specs: list[dict[str, str]] = []
+    for index, item in enumerate(target_themes, start=1):
+        theme = str(item.get("theme") or "").strip()
+        if not theme:
+            continue
+        specs.append(
+            {
+                "index": str(index),
+                "theme": theme,
+                "description": str(item.get("description") or "").strip(),
+            }
+        )
+    return specs
+
+
+def _resolve_coarse_theme_name(
+    raw_ref: Any,
+    *,
+    theme_by_index: dict[str, str],
+    theme_names: set[str],
+) -> str:
+    text = str(raw_ref or "").strip()
+    if not text:
+        return ""
+    if text in theme_names:
+        return text
+    match = COARSE_THEME_KEY_PATTERN.match(text)
+    if not match:
+        return ""
+    return theme_by_index.get(str(int(match.group(1))), "")
+
+
+def _flag_to_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    text = str(value or "").strip().upper()
+    if text in {"T", "TRUE", "1", "Y", "YES"}:
+        return True
+    if text in {"F", "FALSE", "0", "N", "NO"}:
+        return False
+    return None
+
+
 def _extract_json_object(text: str) -> dict[str, Any]:
     content = CODE_FENCE_PATTERN.sub("", str(text or "").strip())
     if not content:
@@ -475,11 +525,8 @@ def _coarse_screening_messages(
     batch: Batch,
 ) -> list[dict[str, str]]:
     theme_lines = []
-    for index, item in enumerate(target_themes, start=1):
-        theme = str(item.get("theme") or "").strip()
-        description = str(item.get("description") or "").strip()
-        detail = f" | {description}" if description else ""
-        theme_lines.append(f"T{index}: {theme}{detail}")
+    for spec in _theme_specs(target_themes):
+        theme_lines.append(f"{spec['index']}: {spec['theme']}")
     themes_block = "\n".join(theme_lines)
     return [
         {"role": "system", "content": COARSE_SYSTEM},
@@ -546,21 +593,43 @@ def _normalize_coarse_screening_payload(
     target_themes: list[dict[str, str]],
 ) -> list[dict[str, Any]]:
     raw_results = payload.get("themes")
-    if not isinstance(raw_results, list):
-        raise Stage2FormatError("粗筛返回缺少 themes 列表。")
-
-    theme_names = _theme_names(target_themes)
+    theme_specs = _theme_specs(target_themes)
+    theme_names = [spec["theme"] for spec in theme_specs]
+    theme_name_set = set(theme_names)
+    theme_by_index = {spec["index"]: spec["theme"] for spec in theme_specs}
     match_map: dict[str, dict[str, Any]] = {}
-    for raw_item in raw_results:
-        if not isinstance(raw_item, dict):
-            continue
-        theme = str(raw_item.get("theme") or "").strip()
-        if theme not in theme_names or theme in match_map:
-            continue
-        match_map[theme] = {
-            "theme": theme,
-            "is_relevant": bool(raw_item.get("is_relevant")),
-        }
+
+    if isinstance(raw_results, list):
+        for raw_item in raw_results:
+            if not isinstance(raw_item, dict):
+                continue
+            theme = _resolve_coarse_theme_name(
+                raw_item.get("theme") or raw_item.get("theme_id") or raw_item.get("index"),
+                theme_by_index=theme_by_index,
+                theme_names=theme_name_set,
+            )
+            if not theme or theme in match_map:
+                continue
+            flag = _flag_to_bool(raw_item.get("is_relevant"))
+            match_map[theme] = {
+                "theme": theme,
+                "is_relevant": False if flag is None else flag,
+            }
+    elif isinstance(payload, dict):
+        for raw_key, raw_value in payload.items():
+            theme = _resolve_coarse_theme_name(raw_key, theme_by_index=theme_by_index, theme_names=theme_name_set)
+            if not theme or theme in match_map:
+                continue
+            flag = _flag_to_bool(raw_value)
+            match_map[theme] = {
+                "theme": theme,
+                "is_relevant": False if flag is None else flag,
+            }
+        if payload and not match_map:
+            raise Stage2FormatError("粗筛返回缺少可识别的主题序号。")
+    else:
+        raise Stage2FormatError("粗筛返回缺少可识别的主题判定对象。")
+
     return [
         match_map.get(theme)
         or {
@@ -582,28 +651,30 @@ def _normalize_targeted_screening_payload(
 
     expected_piece_ids = list(batch.piece_ids)
     expected_set = set(expected_piece_ids)
-    seen_piece_ids: set[str] = set()
+    positive_piece_ids: set[str] = set()
     normalized: list[dict[str, Any]] = []
 
     for raw_item in raw_results:
         if not isinstance(raw_item, dict):
             continue
         piece_id = str(raw_item.get("piece_id") or "").strip()
-        if piece_id not in expected_set or piece_id in seen_piece_ids:
+        if piece_id not in expected_set or piece_id in positive_piece_ids:
             continue
-        seen_piece_ids.add(piece_id)
-        is_relevant = bool(raw_item.get("is_relevant"))
+        is_relevant = _flag_to_bool(raw_item.get("is_relevant"))
+        if is_relevant is False:
+            continue
         reason = str(raw_item.get("reason") or "").strip()
+        positive_piece_ids.add(piece_id)
         normalized.append(
             {
                 "piece_id": piece_id,
-                "is_relevant": is_relevant,
-                "reason": reason if is_relevant else "NA",
+                "is_relevant": True,
+                "reason": reason or "未提供相关理由",
             }
         )
 
     for piece_id in expected_piece_ids:
-        if piece_id in seen_piece_ids:
+        if piece_id in positive_piece_ids:
             continue
         normalized.append(
             {
