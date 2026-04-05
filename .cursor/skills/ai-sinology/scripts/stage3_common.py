@@ -9,6 +9,10 @@ from pathlib import Path
 import re
 from typing import Any
 
+# 本文件位于 ai-sinology/scripts/，故上级目录即为技能根（`.cursor/skills/ai-sinology/`）。
+SKILL_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SKILL_DOTENV = SKILL_ROOT / ".env"
+
 
 def parse_dotenv(dotenv_path: str | Path | None) -> dict[str, str]:
     if dotenv_path is None:
@@ -32,6 +36,27 @@ def merged_env(dotenv_path: str | Path | None = None, env_values: dict[str, str]
     if env_values:
         values.update(env_values)
     return values
+
+
+def merged_env_skill_layered(
+    *,
+    workspace_dotenv: Path | None = None,
+    skill_dotenv: Path | None = None,
+) -> dict[str, str]:
+    """先读仓库根目录 `.env`，再读技能目录 `.env`（同名键以后者为准），最后 `os.environ` 覆盖。"""
+    workspace_dotenv = workspace_dotenv or (Path.cwd() / ".env")
+    skill_dotenv = skill_dotenv or DEFAULT_SKILL_DOTENV
+    values = parse_dotenv(workspace_dotenv)
+    values.update(parse_dotenv(skill_dotenv))
+    values.update(os.environ)
+    return values
+
+
+def resolve_stage3_env(explicit_env_file: str | Path | None) -> dict[str, str]:
+    """若指定 `--env-file`：仅加载该文件 + `os.environ`；若省略：根目录与技能目录分层合并。"""
+    if explicit_env_file is not None:
+        return merged_env(Path(explicit_env_file).expanduser())
+    return merged_env_skill_layered()
 
 
 def ensure_stage3b_dir(project: str, outputs_root: str | Path) -> Path:

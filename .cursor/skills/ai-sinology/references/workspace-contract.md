@@ -7,7 +7,7 @@
 
 所有项目都放在当前工作目录的 `outputs/<project>/` 下。
 
-新建项目时，除 `project_progress.yaml` 外，还应预建：`outputs/<project>/_stage2/` 与 `outputs/<project>/_stage3b/papers/`。
+新建项目时，除 `project_progress.yaml` 外，还应预建：`outputs/<project>/_stage2/`、`outputs/<project>/_stage3b/papers/` 与 `outputs/<project>/_stage3c/papers_md/`。
 
 ## 项目级进度文件
 
@@ -88,7 +88,9 @@ records:
 
 - 阶段三拆成 `3A`、`3B`、`3C` 三段。
 - `3A` 文件：`3a_deepened_thinking.md`
-- `3B` 过程目录：`outputs/<project>/_stage3b/`
+- `3B` 过程目录：`outputs/<project>/_stage3b/`（候选清单、`papers/` 等）
+- `3C` 过程目录：`outputs/<project>/_stage3c/`（`papers_md/`：MinerU 自 `_stage3b/papers/` 中 PDF 生成的 `*_mineru.md`）
+- `3C` 启动前：`outputs/<project>/_stage3b/papers/` 中每个 PDF 应在 `outputs/<project>/_stage3c/papers_md/` 有对应 `*_mineru.md`（MinerU，默认 `vlm`；脚本见 `scripts/stage3c_mineru_pdfs.py`，Token 自仓库根 `.env` 与 `.cursor/skills/ai-sinology/.env` 分层读取，键名 `MINERU_API_TOKEN` 或 `MINERU_TOKEN`）
 - `3C` 文件：`3c_scholarship_map.md`
 - 阶段三要被判定为完成，至少还必须具备：
   - `outputs/<project>/_stage3b/candidate_papers.md`
@@ -99,7 +101,7 @@ records:
 - 上述 `_stage3b/` 文件都属于过程产物，不替代正式阶段文件。
 - `3A` 应先基于阶段一与阶段二原始文献，提炼出更深的问题意识、暂定判断和后续验证重点。
 - `3B` 负责二手研究的检索扩展与候选集收敛。
-- `3C` 必须读取 `3A` 的思考结果、`candidate_papers.md`，以及 `papers/` 中人工导入的论文/题录/笔记，再生成结构化 scholarship map。
+- `3C` 必须读取 `3A` 的思考结果、`candidate_papers.md`、`_stage3c/papers_md/` 中与 PDF 对应的 `*_mineru.md`，以及 `_stage3b/papers/` 中题录/笔记与需核对时的 PDF，再生成结构化 scholarship map。
 
 `3c_scholarship_map.md` 的最小结构：
 

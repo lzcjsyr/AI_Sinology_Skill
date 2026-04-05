@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Tuple, Union
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from stage3_common import dump_json, ensure_stage3b_dir, merged_env, now_iso, slugify
+from stage3_common import dump_json, ensure_stage3b_dir, now_iso, resolve_stage3_env, slugify
 
 
 OPENALEX_ENDPOINT = "https://api.openalex.org/works"
@@ -445,7 +445,11 @@ def default_output_path(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="抓取阶段 3B 的 OpenAlex 来源并归一化为本地 JSON。")
-    parser.add_argument("--env-file", default=".env", help="环境变量文件，默认读取当前目录 .env。")
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="指定单一环境文件；省略时合并仓库根目录 .env 与技能内 .env（见 ai-sinology/.env，后者覆盖前者同名键）。",
+    )
     parser.add_argument("--project", help="项目名。提供后默认把结果写入 outputs/<project>/_stage3b/。")
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
     parser.add_argument("--output", help="自定义输出 JSON 路径。")
@@ -481,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    env = merged_env(args.env_file)
+    env = resolve_stage3_env(args.env_file)
 
     if args.provider == "openalex":
         params, records = fetch_openalex_records(

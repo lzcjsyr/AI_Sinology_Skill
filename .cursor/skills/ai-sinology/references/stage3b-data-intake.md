@@ -99,6 +99,7 @@
 
 - `candidate_papers.md` 是 `3B` 的核心输出。
 - `papers/` 用于存放用户后续自行下载并补入的 PDF、题录导出和读书笔记，不属于 agent 自动下载范围。
+- `3C` 启动时可将 `_stage3b/papers/` 中 PDF 转为 **`outputs/<project>/_stage3c/papers_md/`**（MinerU，默认 `vlm`）；`3B` 只需把核心 PDF 放入 `papers/`。
 - `openalex-*.json` 是 `3B` 的检索过程记录，供后续人工复核和 `3C` 本地写作时回看，但 `3C` 不再继续调用 API。
 
 ## 人工干预点

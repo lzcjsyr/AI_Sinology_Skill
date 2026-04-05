@@ -19,8 +19,11 @@ outputs/*
 !outputs/.gitkeep
 data/
 
-# Secrets
+# Secrets（匹配任意目录下的 `.env`，含 `.cursor/skills/ai-sinology/.env`）
 .env
+
+# Local personal/test artifacts at repo root (do not commit)
+我的合同*
 
 # Local virtual environment
 .venv/
