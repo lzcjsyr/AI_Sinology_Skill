@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+from http.client import IncompleteRead
 import json
+import shutil
+import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, Union
 from urllib.parse import urlencode
@@ -49,17 +53,64 @@ def build_openalex_params(
     return params
 
 
-def fetch_json(endpoint: str, params: dict[str, str | int]) -> dict[str, Any]:
-    query_string = urlencode(params)
-    request = Request(
-        f"{endpoint}?{query_string}",
-        headers={
-            "Accept": "application/json",
-            "User-Agent": "ai-sinology-stage3b/1.0",
-        },
+def fetch_json_via_curl(url: str) -> dict[str, Any]:
+    """Fallback when urllib chunked reads flake; curl handles large OpenAlex payloads reliably."""
+    curl_bin = shutil.which("curl")
+    if not curl_bin:
+        raise RuntimeError("fetch_json: curl not found for fallback")
+    proc = subprocess.run(
+        [
+            curl_bin,
+            "-fsS",
+            "-L",
+            "--max-time",
+            str(DEFAULT_TIMEOUT),
+            "-H",
+            "Accept: application/json",
+            "-H",
+            "User-Agent: ai-sinology-stage3b/1.0",
+            url,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
-    with urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
-        return json.loads(response.read().decode("utf-8"))
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"curl exit {proc.returncode}")
+    return json.loads(proc.stdout)
+
+
+def fetch_json(endpoint: str, params: dict[str, str | int]) -> dict[str, Any]:
+    """GET JSON from OpenAlex; retries on chunked-transfer IncompleteRead (common with urllib)."""
+    query_string = urlencode(params)
+    url = f"{endpoint}?{query_string}"
+    last_err: BaseException | None = None
+    for attempt in range(6):
+        request = Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "ai-sinology-stage3b/1.0",
+                "Accept-Encoding": "identity",
+                "Connection": "close",
+            },
+        )
+        try:
+            with urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
+                raw_bytes = response.read()
+            return json.loads(raw_bytes.decode("utf-8"))
+        except IncompleteRead as exc:
+            last_err = exc
+            time.sleep(0.25 * (attempt + 1))
+        except OSError as exc:
+            last_err = exc
+            time.sleep(0.25 * (attempt + 1))
+    try:
+        return fetch_json_via_curl(url)
+    except Exception as curl_exc:
+        if last_err:
+            raise last_err from curl_exc
+        raise curl_exc
 
 
 def short_openalex_id(value: str | None) -> str:
@@ -496,11 +547,14 @@ def main() -> int:
             mailto=args.mailto,
             api_key=args.api_key or env.get("OPENALEX_API_KEY", ""),
         )
+        params_for_disk = dict(params)
+        if "api_key" in params_for_disk:
+            params_for_disk["api_key"] = ""
         payload = {
             "provider": args.provider,
             "query": args.query,
             "retrieved_at": now_iso(),
-            "params": params,
+            "params": params_for_disk,
             "record_count": len(records),
             "records": records,
         }
