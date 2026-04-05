@@ -371,7 +371,7 @@ class Stage2CliTests(unittest.TestCase):
                 return Stage2CliTests._fake_chat_json(self, messages=messages, max_tokens=max_tokens, temperature=temperature)
 
             with (
-                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=asserting_chat_json),
+                patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=asserting_chat_json),
                 patch("runtime.stage2.cli.Path.cwd", return_value=root),
                 patch(
                     "sys.argv",
@@ -409,7 +409,7 @@ class Stage2CliTests(unittest.TestCase):
             (repo_dir / "KR4c0001_000.txt").write_text("#+TITLE: 测试\n正文内容\n", encoding="utf-8")
 
             with (
-                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", side_effect=AssertionError("should not run")),
+                patch("runtime.stage2.runner.LiteLLMClient.chat_json", side_effect=AssertionError("should not run")),
                 patch(
                     "sys.argv",
                     [
@@ -536,7 +536,7 @@ class Stage2CliTests(unittest.TestCase):
 
             stdout = io.StringIO()
             with (
-                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=self._fake_chat_json),
+                patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=self._fake_chat_json),
                 patch("runtime.stage2.cli.Path.cwd", return_value=root),
                 patch(
                     "sys.argv",
@@ -608,7 +608,7 @@ class Stage2CliTests(unittest.TestCase):
             )
 
             with (
-                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=self._fake_chat_json),
+                patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=self._fake_chat_json),
                 patch("runtime.stage2.cli.Path.cwd", return_value=root),
                 patch(
                     "sys.argv",
@@ -630,7 +630,7 @@ class Stage2CliTests(unittest.TestCase):
                 first_summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
 
             with (
-                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=self._fake_chat_json),
+                patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=self._fake_chat_json),
                 patch("runtime.stage2.cli.Path.cwd", return_value=root),
                 patch(
                     "sys.argv",
@@ -680,7 +680,7 @@ class Stage2CliTests(unittest.TestCase):
             )
 
             with (
-                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=self._fake_chat_json),
+                patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=self._fake_chat_json),
                 patch("runtime.stage2.cli.Path.cwd", return_value=root),
                 patch(
                     "sys.argv",
@@ -701,7 +701,7 @@ class Stage2CliTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
                 first_summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
 
-            with patch("runtime.stage2.runner.OpenAICompatClient.chat_json", side_effect=AssertionError("should not call model again")):
+            with patch("runtime.stage2.runner.LiteLLMClient.chat_json", side_effect=AssertionError("should not call model again")):
                 summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
 
             self.assertEqual(first_summary["piece_count"], 1)
@@ -754,7 +754,7 @@ class Stage2CliTests(unittest.TestCase):
                     raise RuntimeError("simulated interruption")
                 return Stage2CliTests._fake_chat_json(self, messages=messages, max_tokens=max_tokens, temperature=temperature)
 
-            with patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=flaky_chat_json):
+            with patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=flaky_chat_json):
                 with self.assertRaises(RuntimeError):
                     run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
 
@@ -766,7 +766,7 @@ class Stage2CliTests(unittest.TestCase):
 
             stdout = io.StringIO()
             with (
-                patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=self._fake_chat_json),
+                patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=self._fake_chat_json),
                 patch("sys.stdout", stdout),
             ):
                 summary = run_stage2_pipeline(
@@ -790,7 +790,7 @@ class Stage2CliTests(unittest.TestCase):
                 raise Stage2FormatError("模型输出不是合法 JSON: refusal")
             return Stage2CliTests._fake_chat_json(self, messages=messages, max_tokens=max_tokens, temperature=temperature)
 
-        with patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=fallback_chat_json):
+        with patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=fallback_chat_json):
             summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
 
         coarse_rows = read_jsonl(project_dir / "_stage2" / "targets" / "KR4c0001" / "llm1_coarse_screening.jsonl")
@@ -813,7 +813,7 @@ class Stage2CliTests(unittest.TestCase):
                 raise Stage2FormatError("模型输出不是合法 JSON: refusal")
             return Stage2CliTests._fake_chat_json(self, messages=messages, max_tokens=max_tokens, temperature=temperature)
 
-        with patch("runtime.stage2.runner.OpenAICompatClient.chat_json", new=manual_review_chat_json):
+        with patch("runtime.stage2.runner.LiteLLMClient.chat_json", new=manual_review_chat_json):
             summary = run_stage2_pipeline(project_dir=project_dir, dotenv_path=root / ".env")
 
         target_dir = project_dir / "_stage2" / "targets" / "KR4c0001"
@@ -830,6 +830,36 @@ class Stage2CliTests(unittest.TestCase):
         self.assertIn("冬雷忽作，诗人惊而有咏。", manual_review_report)
         self.assertTrue(final_rows[0]["needs_manual_review"])
         self.assertIn("自动兜底失败", final_rows[0]["manual_review_reason"])
+
+    def test_cli_returns_resume_hint_when_pipeline_fails(self) -> None:
+        root, project_dir = self._prepare_stage2_demo()
+        stderr = io.StringIO()
+
+        with (
+            patch("runtime.stage2.cli.Path.cwd", return_value=root),
+            patch("runtime.stage2.cli.run_stage2_pipeline", side_effect=RuntimeError("simulated tunnel failure")),
+            patch(
+                "sys.argv",
+                [
+                    "stage2-cli",
+                    "--outputs",
+                    str(root / "outputs"),
+                    "--project",
+                    "demo",
+                    "--kanripo-root",
+                    str(root / "kanripo_repos"),
+                    "--targets",
+                    "KR4c0001",
+                ],
+            ),
+            patch("sys.stderr", stderr),
+        ):
+            exit_code = main()
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("阶段二失败", stderr.getvalue())
+        self.assertIn("可直接重跑当前命令续跑", stderr.getvalue())
+        self.assertIn(str(project_dir / "_stage2" / "manifest.json"), stderr.getvalue())
 
 
 if __name__ == "__main__":

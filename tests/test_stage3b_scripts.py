@@ -1,31 +1,11 @@
 from __future__ import annotations
 
-from importlib.util import module_from_spec, spec_from_file_location
-import sys
 import unittest
-from pathlib import Path
 
+from runtime.stage2.io_utils import load_skill_script
 
 def _load_script_module(filename: str, module_name: str):
-    script_path = (
-        Path(__file__).resolve().parent.parent
-        / ".agent"
-        / "skills"
-        / "ai-sinology"
-        / "scripts"
-        / filename
-    )
-    spec = spec_from_file_location(module_name, script_path)
-    assert spec is not None and spec.loader is not None
-    sys.path.insert(0, str(script_path.parent))
-    module = module_from_spec(spec)
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        if sys.path and sys.path[0] == str(script_path.parent):
-            sys.path.pop(0)
-    return module
+    return load_skill_script(module_name, filename)
 
 
 _STAGE3_SOURCES = _load_script_module("stage3b_sources.py", "test_ai_sinology_stage3b_sources")
@@ -54,27 +34,6 @@ class Stage3BScriptsTests(unittest.TestCase):
         self.assertEqual(payload["authors"], ["Li Ming"])
         self.assertEqual(payload["abstract"], "Rain ritual")
         self.assertEqual(payload["openalex_id"], "W123")
-
-    def test_normalize_baidu_scholar_work_extracts_core_fields(self) -> None:
-        work = {
-            "abstract": "讨论汉代灾异说。",
-            "aiAbstract": "",
-            "doi": "CNKI:SUN:ZSHK.0.1991-03-008",
-            "keyword": "灾异说;儒家经典;董仲舒",
-            "paperId": "paper-123",
-            "publishInfo": {"journalName": "中国社会科学"},
-            "publishYear": 1991,
-            "title": "汉代灾异学说与儒家君道论",
-            "url": "https://xueshu.baidu.com/demo",
-        }
-
-        payload = _STAGE3_SOURCES.normalize_baidu_scholar_work(work)
-
-        self.assertEqual(payload["source"], "baidu-scholar")
-        self.assertEqual(payload["baidu_scholar_id"], "paper-123")
-        self.assertEqual(payload["journal"], "中国社会科学")
-        self.assertEqual(payload["keywords"], ["灾异说", "儒家经典", "董仲舒"])
-        self.assertEqual(payload["landing_page_url"], "https://xueshu.baidu.com/demo")
 
     def test_expand_openalex_citations_fetches_one_hop_and_dedupes(self) -> None:
         def fake_fetcher(

@@ -6,7 +6,7 @@
 - `4_argument_audit.md`
 - `2_primary_corpus.yaml`
 - `3a_deepened_thinking.md`
-- `3c_scholarship_map.yaml`
+- `3c_scholarship_map.md`
 
 ## 输出
 

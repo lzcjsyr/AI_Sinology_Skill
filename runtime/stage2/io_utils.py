@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+from importlib.util import module_from_spec, spec_from_file_location
 import json
 from pathlib import Path
 import re
+import sys
+from types import ModuleType
 from typing import Any
 
 
 JSONL_RECORDS_KEY = "records"
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+SKILL_ROOT_CANDIDATES = (
+    WORKSPACE_ROOT / ".agent" / "skills" / "ai-sinology",
+    WORKSPACE_ROOT / ".cursor" / "skills" / "ai-sinology",
+)
 
 _SAFE_YAML_SCALAR_PATTERN = re.compile(r"^[\w\u4e00-\u9fff\-./:()%]+$")
 
@@ -78,6 +86,43 @@ def append_jsonl(path: str | Path, row: dict[str, Any]) -> Path:
     rows = read_jsonl(path)
     rows.append(row)
     return write_jsonl(path, rows)
+
+
+def resolve_skill_root() -> Path:
+    for root in SKILL_ROOT_CANDIDATES:
+        if (root / "SKILL.md").exists():
+            return root
+    for root in SKILL_ROOT_CANDIDATES:
+        if root.exists():
+            return root
+    searched = "、".join(str(path) for path in SKILL_ROOT_CANDIDATES)
+    raise FileNotFoundError(f"未找到 ai-sinology skill 目录。已检查: {searched}")
+
+
+def resolve_skill_script(script_name: str) -> Path:
+    checked: list[str] = []
+    for root in SKILL_ROOT_CANDIDATES:
+        script_path = root / "scripts" / script_name
+        checked.append(str(script_path))
+        if script_path.exists():
+            return script_path
+    raise FileNotFoundError(f"未找到 skill 脚本。已检查: {'、'.join(checked)}")
+
+
+def load_skill_script(module_name: str, script_name: str) -> ModuleType:
+    script_path = resolve_skill_script(script_name)
+    spec = spec_from_file_location(module_name, script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载 Skill 脚本: {script_path}")
+    sys.path.insert(0, str(script_path.parent))
+    module = module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if sys.path and sys.path[0] == str(script_path.parent):
+            sys.path.pop(0)
+    return module
 
 
 def _yaml_scalar(value: Any) -> str:

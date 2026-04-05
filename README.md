@@ -20,9 +20,10 @@
 4. 运行阶段二 CLI，直接执行 Kanripo 原始文献勘查，并写回 `outputs/<project>/2_primary_corpus.yaml`
 5. 回到 Skill 内推进阶段三：
    - `3A` 生成 `3a_deepened_thinking.md`
+   - `3A` 做完后先停下来，等待用户确认
    - `3B` 用 `stage3b_sources.py` 检索扩展与候选集收敛，维护 `outputs/<project>/_stage3b/candidate_papers.md`
-   - 人工根据 `candidate_papers.md` 下载核心论文、题录导出或笔记，放入 `outputs/<project>/_stage3b/papers/`
-   - `3C` 由 agent 必须读取阶段一、阶段二、`3A`、`candidate_papers.md` 与 `papers/` 中人工补料，直接完成 `3c_scholarship_map.yaml`
+   - `3B` 做完后再次停下来；人工根据 `candidate_papers.md` 下载核心论文、题录导出或笔记，放入 `outputs/<project>/_stage3b/papers/`
+   - `3C` 只在用户确认且 `papers/` 中已有人工补料后开始，生成 `3c_scholarship_map.md`
 6. 继续生成 `4_outline_matrix.yaml` 与 `4_argument_audit.md`
 7. 生成 `5_first_draft.md`
 8. 最后生成终稿与投稿包：`6_final_manuscript.md`、`6_abstract_keywords.md`、`6_title_options.md`、`6_anonymous_submission_checklist.md`、`6_claim_boundary.md`，并推荐补 `6_revision_checklist.md`
@@ -56,10 +57,9 @@
 │       ├── _stage2/
 │       │   ├── manifest.json
 │       ├── 3a_deepened_thinking.md
-│       ├── 3c_scholarship_map.yaml
+│       ├── 3c_scholarship_map.md
 │       ├── _stage3b/
 │       │   ├── openalex-*.json
-│       │   ├── baidu-scholar-*.json
 │       │   ├── candidate_papers.md
 │       │   ├── screening-notes.md
 │       │   └── papers/
@@ -92,9 +92,8 @@ python3 -m runtime.stage2.cli --project demo --checkpoint-action checkpoint --ch
 python3 -m runtime.stage2.cli --project demo --checkpoint-action complete --checkpoint-target KR3j0160
 python3 -m runtime.stage2.env_check --kanripo-root /path/to/kanripo_repos
 python3 -m runtime.stage2.env_check --api-smoke-test --slot llm1 --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage3b_sources.py baidu-scholar --project demo --query "汉代 灾异 诠释" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage3b_sources.py openalex --project demo --query "汉代 灾异 诠释" --env-file .env
-python3 .agent/skills/ai-sinology/scripts/stage3b_sources.py openalex-expand --project demo --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --expand-mode references --per-page 10 --env-file .env
+python3 .agent/skills/ai-sinology/scripts/stage3b_sources.py --env-file .env --project demo openalex --query "汉代 灾异 诠释"
+python3 .agent/skills/ai-sinology/scripts/stage3b_sources.py --env-file .env --project demo openalex-expand --query "汉代 灾异 诠释" --round-index 1 --seed-id W123 --seed-id W456 --expand-mode references --per-page 10
 pytest
 ```
 
@@ -126,8 +125,10 @@ pytest
 阶段三严格拆成三段：
 
 - `3A`：回到阶段二原始文献，写 `3a_deepened_thinking.md`
+- `3A` 完成后必须停下来，等待用户确认
 - `3B`：做二手研究检索扩展与候选集收敛，过程文件写到 `_stage3b/`
-- `3C`：由 agent 读取阶段一、阶段二、`3A`、`_stage3b/candidate_papers.md` 与 `_stage3b/papers/` 中人工导入材料，生成 `3c_scholarship_map.yaml`
+- `3B` 完成后也必须停下来，等待用户确认与人工补料
+   - `3C`：只在用户确认且 `papers/` 中已有人工导入材料后，读取阶段一、阶段二、`3A`、`_stage3b/candidate_papers.md` 与 `_stage3b/papers/`，生成 `3c_scholarship_map.md`
 
 阶段三不再存在 `2A/2B` 表述，也不再依赖 `2b_scholarship_map.yaml` 或 `stage3_handoff`。
 

@@ -8,7 +8,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .api_config import STAGE2_MODELS, merged_env, slot_payload
+from .api_config import (
+    STAGE2_MODELS,
+    litellm_response_to_dict,
+    merged_env,
+    normalize_litellm_base_url,
+    slot_payload,
+)
 from .catalog import catalog_root, list_available_scope_dirs, list_available_scope_options
 from .session import slot_summaries
 
@@ -72,19 +78,13 @@ def api_smoke_test(slot: str, *, env_file: str | Path | None = None) -> dict[str
         temperature=0.0,
         custom_llm_provider="openai",
         api_key=payload["api_key"],
-        api_base=payload["base_url"],
+        base_url=normalize_litellm_base_url(payload["base_url"]),
         timeout=60,
         num_retries=2,
         max_tokens=32,
         response_format={"type": "json_object"},
     )
-
-    if hasattr(response, "model_dump"):
-        data = response.model_dump()
-    elif hasattr(response, "dict"):
-        data = response.dict()
-    else:
-        data = dict(response)
+    data = litellm_response_to_dict(response)
 
     return {
         "slot": slot,

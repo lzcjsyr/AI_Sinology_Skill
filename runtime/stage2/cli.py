@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from importlib.util import module_from_spec, spec_from_file_location
 import json
 import os
 from pathlib import Path
@@ -16,6 +15,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from runtime.stage2.catalog import measure_corpus_overview, resolve_analysis_targets
+from runtime.stage2.io_utils import load_skill_script
 from runtime.stage2.runner import run_stage2_pipeline
 from runtime.stage2.session import (
     Stage2Context,
@@ -57,31 +57,7 @@ _ANSI_CODES = {
     "cyan": "\033[36m",
 }
 
-
-def _load_workspace_contract_module():
-    skill_script = (
-        WORKSPACE_ROOT
-        / ".agent"
-        / "skills"
-        / "ai-sinology"
-        / "scripts"
-        / "workspace_contract.py"
-    )
-    spec = spec_from_file_location("ai_sinology_workspace_contract", skill_script)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"无法加载 Skill 工作区契约脚本: {skill_script}")
-    sys.path.insert(0, str(skill_script.parent))
-    module = module_from_spec(spec)
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        if sys.path and sys.path[0] == str(skill_script.parent):
-            sys.path.pop(0)
-    return module
-
-
-_WORKSPACE_CONTRACT_MODULE = _load_workspace_contract_module()
+_WORKSPACE_CONTRACT_MODULE = load_skill_script("ai_sinology_workspace_contract", "workspace_contract.py")
 inspect_project = _WORKSPACE_CONTRACT_MODULE.inspect_project
 list_projects = _WORKSPACE_CONTRACT_MODULE.list_projects
 
@@ -860,16 +836,44 @@ def main() -> int:
             as_json=args.json,
         )
     if should_run:
-        summary = run_stage2_pipeline(
-            project_dir=project_dir,
-            dotenv_path=resolved_env_file,
-            max_fragments=args.max_fragments,
-            llm1_workers=args.llm1_workers,
-            llm2_workers=args.llm2_workers,
-            llm3_workers=args.llm3_workers,
-            force_rerun=args.force_rerun,
-            progress_callback=_build_progress_printer(as_json=args.json),
-        )
+        try:
+            summary = run_stage2_pipeline(
+                project_dir=project_dir,
+                dotenv_path=resolved_env_file,
+                max_fragments=args.max_fragments,
+                llm1_workers=args.llm1_workers,
+                llm2_workers=args.llm2_workers,
+                llm3_workers=args.llm3_workers,
+                force_rerun=args.force_rerun,
+                progress_callback=_build_progress_printer(as_json=args.json),
+            )
+        except Exception as exc:  # noqa: BLE001
+            paused_manifest = load_stage2_manifest(project_dir)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "project_name": project_name,
+                            "error": str(exc),
+                            "manifest_path": str(manifest_path(project_dir)),
+                            "resume_hint": "可直接重跑当前命令续跑。",
+                            "retrieval_progress": (paused_manifest or {}).get("retrieval_progress") or {},
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            else:
+                print(file=sys.stderr)
+                print(f"阶段二失败 · {project_name} · {exc}", file=sys.stderr)
+                print(f"断点文件: {manifest_path(project_dir)}", file=sys.stderr)
+                print("可直接重跑当前命令续跑。", file=sys.stderr)
+                if paused_manifest:
+                    print(
+                        summarize_retrieval_progress((paused_manifest.get("retrieval_progress") or {})),
+                        file=sys.stderr,
+                    )
+            return 1
         _emit_run_summary(summary, as_json=args.json)
     return 0
 

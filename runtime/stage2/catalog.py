@@ -286,8 +286,7 @@ def text_files_for_repo_dir(kanripo_root: Path, repo_dir: str) -> list[Path]:
         if path.is_file() and path.suffix == ".txt"
     )
 
-
-def _clean_fragment_text(text: str) -> str:
+def _normalize_fragment_text(text: str, *, compact_whitespace: bool) -> str:
     lines: list[str] = []
     for raw_line in text.splitlines():
         stripped = raw_line.strip()
@@ -300,10 +299,40 @@ def _clean_fragment_text(text: str) -> str:
             if payload and TECH_COMMENT_PATTERN.search(payload):
                 continue
         content = PAGE_MARKER_PATTERN.sub("", stripped).replace("¶", "")
-        content = "".join(content.split())
+        if compact_whitespace:
+            content = "".join(content.split())
+        else:
+            content = content.strip()
         if content:
             lines.append(content)
     return "\n".join(lines).strip()
+
+
+def extract_fragment_rows(
+    raw_text: str,
+    *,
+    fallback_piece_id: str,
+    compact_whitespace: bool,
+) -> list[tuple[str, str]]:
+    matches = list(PAGE_MARKER_PATTERN.finditer(raw_text))
+    rows: list[tuple[str, str]] = []
+
+    if not matches:
+        cleaned = _normalize_fragment_text(raw_text, compact_whitespace=compact_whitespace)
+        if cleaned:
+            rows.append((fallback_piece_id, cleaned))
+        return rows
+
+    for index, match in enumerate(matches):
+        marker = raw_text[match.start() : match.end()]
+        piece_id = marker[4:-1].strip()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_text)
+        cleaned = _normalize_fragment_text(raw_text[start:end], compact_whitespace=compact_whitespace)
+        if not piece_id or not cleaned:
+            continue
+        rows.append((piece_id, cleaned))
+    return rows
 
 
 def _estimate_batch_count_from_lengths(fragment_lengths: list[int]) -> int:
@@ -328,23 +357,12 @@ def _estimate_batch_count_from_lengths(fragment_lengths: list[int]) -> int:
 
 def _measure_text_file(path: Path) -> tuple[int, int, int]:
     raw_text = path.read_text(encoding="utf-8", errors="ignore")
-    matches = list(PAGE_MARKER_PATTERN.finditer(raw_text))
-    fragment_lengths: list[int] = []
-
-    if not matches:
-        cleaned = _clean_fragment_text(raw_text)
-        if not cleaned:
-            return 0, 0, 0
-        length = len(cleaned.replace("\n", ""))
-        return length, 1, 1
-
-    for index, match in enumerate(matches):
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_text)
-        cleaned = _clean_fragment_text(raw_text[start:end])
-        if not cleaned:
-            continue
-        fragment_lengths.append(len(cleaned.replace("\n", "")))
+    fragment_rows = extract_fragment_rows(
+        raw_text,
+        fallback_piece_id=f"{path.stem}_fallback_0001",
+        compact_whitespace=True,
+    )
+    fragment_lengths = [len(text.replace("\n", "")) for _, text in fragment_rows]
 
     if not fragment_lengths:
         return 0, 0, 0

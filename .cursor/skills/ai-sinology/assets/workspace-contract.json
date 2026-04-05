@@ -18,7 +18,7 @@
     {
       "index": 3,
       "name": "3A深化思考、3B检索收敛、3C学术史地图",
-      "required_all": ["3a_deepened_thinking.md", "_stage3b/candidate_papers.md", "3c_scholarship_map.yaml"],
+      "required_all": ["3a_deepened_thinking.md", "_stage3b/candidate_papers.md", "3c_scholarship_map.md"],
       "required_any": [],
       "required_nonempty_dirs": ["_stage3b/papers"],
       "recommended": ["_stage3b"]

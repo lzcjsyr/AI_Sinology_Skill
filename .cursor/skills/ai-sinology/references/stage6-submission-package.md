@@ -4,7 +4,7 @@
 
 - `6_final_manuscript.md`
 - `4_argument_audit.md`
-- `3c_scholarship_map.yaml`
+- `3c_scholarship_map.md`
 
 ## 输出
 

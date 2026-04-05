@@ -17,7 +17,6 @@ from stage3_common import dump_json, ensure_stage3b_dir, merged_env, now_iso, sl
 
 
 OPENALEX_ENDPOINT = "https://api.openalex.org/works"
-BAIDU_SCHOLAR_ENDPOINT = "https://qianfan.baidubce.com/v2/tools/baidu_scholar/search"
 DEFAULT_TIMEOUT = 30
 OpenAlexFetcher = Callable[..., Tuple[Dict[str, Union[str, int]], List[Dict[str, Any]]]]
 OPENALEX_ID_BATCH_SIZE = 100
@@ -58,21 +57,6 @@ def fetch_json(endpoint: str, params: dict[str, str | int]) -> dict[str, Any]:
             "Accept": "application/json",
             "User-Agent": "ai-sinology-stage3b/1.0",
         },
-    )
-    with urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def fetch_json_with_headers(
-    endpoint: str,
-    params: dict[str, str | int],
-    *,
-    headers: dict[str, str],
-) -> dict[str, Any]:
-    query_string = urlencode(params)
-    request = Request(
-        f"{endpoint}?{query_string}",
-        headers=headers,
     )
     with urlopen(request, timeout=DEFAULT_TIMEOUT) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -146,56 +130,10 @@ def normalize_openalex_work(work: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def extract_baidu_scholar_keywords(work: dict[str, Any]) -> list[str]:
-    raw = str(work.get("keyword", "")).strip()
-    if not raw:
-        return []
-    values: list[str] = []
-    for part in raw.replace("；", ";").replace("，", ";").split(";"):
-        keyword = part.strip()
-        if keyword and keyword not in values:
-            values.append(keyword)
-    return values[:12]
-
-
-def normalize_baidu_scholar_work(work: dict[str, Any]) -> dict[str, Any]:
-    publish_info = work.get("publishInfo") or {}
-    doi = str(work.get("doi", "")).strip()
-    title = str(work.get("title", "")).strip()
-    abstract = str(work.get("abstract", "")).strip()
-    ai_abstract = str(work.get("aiAbstract", "")).strip()
-    paper_id = str(work.get("paperId", "")).strip()
-    journal = str(publish_info.get("journalName", "")).strip()
-    url = str(work.get("url", "")).strip()
-    return {
-        "source": "baidu-scholar",
-        "id": paper_id,
-        "baidu_scholar_id": paper_id,
-        "doi": doi,
-        "title": title,
-        "year": work.get("publishYear"),
-        "type": "article",
-        "authors": [],
-        "journal": journal,
-        "abstract": abstract or ai_abstract,
-        "cited_by_count": 0,
-        "landing_page_url": url,
-        "pdf_url": "",
-        "keywords": extract_baidu_scholar_keywords(work),
-        "referenced_works": [],
-        "related_works": [],
-        "baidu_ai_abstract": ai_abstract,
-        "baidu_raw_publish_info": publish_info,
-    }
-
-
 def record_key(record: dict[str, Any]) -> str:
     openalex_id = short_openalex_id(record.get("openalex_id") or record.get("id"))
     if openalex_id:
         return f"openalex:{openalex_id.lower()}"
-    baidu_scholar_id = str(record.get("baidu_scholar_id") or "").strip().lower()
-    if baidu_scholar_id:
-        return f"baidu-scholar:{baidu_scholar_id}"
     doi = str(record.get("doi", "")).strip().lower()
     if doi:
         return f"doi:{doi}"
@@ -364,31 +302,6 @@ def fetch_openalex_records_by_ids(
     return records, fetches
 
 
-def fetch_baidu_scholar_records(
-    *,
-    query: str,
-    page_num: int,
-    api_key: str = "",
-    enable_abstract: bool = False,
-) -> tuple[dict[str, str | int], list[dict[str, Any]]]:
-    params: dict[str, str | int] = {
-        "wd": query,
-        "pageNum": page_num,
-    }
-    if enable_abstract:
-        params["enable_abstract"] = "true"
-    raw = fetch_json_with_headers(
-        BAIDU_SCHOLAR_ENDPOINT,
-        params,
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "User-Agent": "ai-sinology-stage3b/1.0",
-        },
-    )
-    return params, [normalize_baidu_scholar_work(item) for item in raw.get("data", [])]
-
-
 def expand_openalex_citations(
     *,
     query: str,
@@ -531,7 +444,7 @@ def default_output_path(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="抓取阶段 3B 开放来源并归一化为本地 JSON。")
+    parser = argparse.ArgumentParser(description="抓取阶段 3B 的 OpenAlex 来源并归一化为本地 JSON。")
     parser.add_argument("--env-file", default=".env", help="环境变量文件，默认读取当前目录 .env。")
     parser.add_argument("--project", help="项目名。提供后默认把结果写入 outputs/<project>/_stage3b/。")
     parser.add_argument("--outputs", default="outputs", help="项目输出目录，默认是 ./outputs。")
@@ -563,12 +476,6 @@ def build_parser() -> argparse.ArgumentParser:
     openalex_expand.add_argument("--mailto", default="", help="显式覆盖 polite identification。")
     openalex_expand.add_argument("--api-key", default="", help="显式覆盖 OPENALEX_API_KEY。")
 
-    baidu_scholar = subparsers.add_parser("baidu-scholar", help="从百度学术抓取论文结果。")
-    baidu_scholar.add_argument("--query", required=True, help="检索词，对应百度学术 wd。")
-    baidu_scholar.add_argument("--page-num", type=int, default=0, help="页码，从 0 开始。")
-    baidu_scholar.add_argument("--enable-abstract", action="store_true", help="开启 AI 摘要。")
-    baidu_scholar.add_argument("--api-key", default="", help="显式覆盖 QIANFAN_API_KEY。")
-
     return parser
 
 
@@ -584,24 +491,6 @@ def main() -> int:
             filter_expr=args.filter,
             mailto=args.mailto,
             api_key=args.api_key or env.get("OPENALEX_API_KEY", ""),
-        )
-        payload = {
-            "provider": args.provider,
-            "query": args.query,
-            "retrieved_at": now_iso(),
-            "params": params,
-            "record_count": len(records),
-            "records": records,
-        }
-    elif args.provider == "baidu-scholar":
-        api_key = args.api_key or env.get("QIANFAN_API_KEY", "") or env.get("BAIDU_QIANFAN_API_KEY", "")
-        if not api_key:
-            raise SystemExit("缺少百度学术 API key，请检查 QIANFAN_API_KEY 或 BAIDU_QIANFAN_API_KEY。")
-        params, records = fetch_baidu_scholar_records(
-            query=args.query,
-            page_num=args.page_num,
-            api_key=api_key,
-            enable_abstract=args.enable_abstract,
         )
         payload = {
             "provider": args.provider,

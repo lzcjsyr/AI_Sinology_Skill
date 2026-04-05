@@ -1,118 +1,107 @@
 from __future__ import annotations
 
-import io
 import json
 import unittest
 from unittest.mock import Mock
 from unittest.mock import patch
-from urllib.error import HTTPError
 
-from runtime.stage2.api_config import RateControllerRegistry, estimate_request_tokens
-from runtime.stage2.runner import OpenAICompatClient
+import litellm
+
+import runtime.stage2.runner as runner_module
+from runtime.stage2.runner import LiteLLMClient, Stage2RunnerError
 
 
-class Stage2RateControlTests(unittest.TestCase):
-    def test_estimate_request_tokens_counts_prompt_and_completion_budget(self) -> None:
-        estimated = estimate_request_tokens(
-            messages=[
-                {"role": "system", "content": "你是助手。"},
-                {"role": "user", "content": "请判断这段文本是否与冬雷有关。"},
-            ],
-            max_tokens=1200,
+def _mock_response(payload: dict) -> Mock:
+    response = Mock()
+    response.model_dump.return_value = payload
+    return response
+
+
+class Stage2LiteLLMClientTests(unittest.TestCase):
+    def test_client_rotates_api_keys_round_robin(self) -> None:
+        client = LiteLLMClient(
+            model="test-model",
+            base_url="https://example.com/v1/chat/completions",
+            api_keys=("key-a", "key-b"),
+            slot="llm1",
         )
-
-        self.assertGreaterEqual(estimated, 1200)
-
-    def test_registry_reuses_controller_for_same_slot_signature(self) -> None:
-        registry = RateControllerRegistry()
         payload = {
-            "provider": "volcengine",
-            "model": "deepseek-v3-2-251201",
-            "api_keys": ("key-a", "key-b"),
-            "rpm": 120,
-            "tpm": 120000,
+            "choices": [{"message": {"content": json.dumps({"ok": True}, ensure_ascii=False)}}],
+            "usage": {"total_tokens": 12},
         }
+        seen_keys: list[str] = []
+        seen_bases: list[str] = []
 
-        left = registry.get(payload)
-        right = registry.get(dict(payload))
+        def fake_completion(**kwargs):  # noqa: ANN003
+            seen_keys.append(kwargs["api_key"])
+            seen_bases.append(kwargs["base_url"])
+            return _mock_response(payload)
 
-        self.assertIs(left, right)
+        with patch("runtime.stage2.runner.completion", side_effect=fake_completion):
+            client.chat_json(messages=[{"role": "user", "content": "hi"}], max_tokens=32)
+            client.chat_json(messages=[{"role": "user", "content": "hi"}], max_tokens=32)
 
-    def test_multi_key_acquire_balances_between_keys(self) -> None:
-        registry = RateControllerRegistry()
-        controller = registry.get(
-            {
-                "provider": "volcengine",
-                "model": "deepseek-v3-2-251201",
-                "api_keys": ("key-a", "key-b"),
-                "rpm": 120,
-                "tpm": 120000,
-            }
-        )
+        self.assertEqual(seen_keys, ["key-a", "key-b"])
+        self.assertEqual(seen_bases, ["https://example.com/v1", "https://example.com/v1"])
 
-        first = controller.acquire(estimated_tokens=500)
-        second = controller.acquire(estimated_tokens=500)
-
-        self.assertEqual({first.api_key, second.api_key}, {"key-a", "key-b"})
-
-    def test_effective_worker_limit_shrinks_under_tpm_budget(self) -> None:
-        registry = RateControllerRegistry()
-        controller = registry.get(
-            {
-                "provider": "volcengine",
-                "model": "deepseek-v3-2-251201",
-                "api_keys": ("key-a", "key-b"),
-                "rpm": 600,
-                "tpm": 6000,
-            }
-        )
-
-        workers = controller.effective_worker_limit(requested_workers=16, estimated_tokens=1000)
-
-        self.assertEqual(workers, 2)
-
-    def test_openai_client_retries_on_http_429(self) -> None:
-        client = OpenAICompatClient(
+    def test_client_retries_without_response_format_after_bad_request(self) -> None:
+        client = LiteLLMClient(
             model="test-model",
             base_url="https://example.com/v1",
             api_keys=("test-key",),
             slot="llm1",
-            rate_controller=None,
         )
         payload = {
-            "choices": [
-                {
-                    "message": {
-                        "content": json.dumps({"ok": True}, ensure_ascii=False),
-                    }
-                }
-            ],
-            "usage": {"total_tokens": 123},
+            "choices": [{"message": {"content": json.dumps({"ok": True}, ensure_ascii=False)}}],
+            "usage": {"total_tokens": 12},
         }
-        response = Mock()
-        response.read.return_value = json.dumps(payload).encode("utf-8")
-        response.__enter__ = Mock(return_value=response)
-        response.__exit__ = Mock(return_value=None)
-        rate_limited = HTTPError(
-            url="https://example.com/v1/chat/completions",
-            code=429,
-            msg="Too Many Requests",
-            hdrs={"Retry-After": "0"},
-            fp=io.BytesIO(b'{"error":"rate limited"}'),
+        bad_request = litellm.BadRequestError("bad", model="test-model", llm_provider="openai")
+
+        with patch(
+            "runtime.stage2.runner.completion",
+            side_effect=[bad_request, _mock_response(payload)],
+        ) as mocked_completion:
+            result, usage = client.chat_json(messages=[{"role": "user", "content": "hi"}], max_tokens=32)
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(usage["total_tokens"], 12)
+        self.assertEqual(mocked_completion.call_count, 2)
+        self.assertIn("response_format", mocked_completion.call_args_list[0].kwargs)
+        self.assertNotIn("response_format", mocked_completion.call_args_list[1].kwargs)
+
+    def test_client_surfaces_network_error_as_stage2_runner_error(self) -> None:
+        client = LiteLLMClient(
+            model="test-model",
+            base_url="https://example.com/v1",
+            api_keys=("test-key",),
+            slot="llm1",
+        )
+
+        with patch(
+            "runtime.stage2.runner.completion",
+            side_effect=litellm.APIConnectionError("Tunnel connection failed: 503", model="test-model", llm_provider="openai"),
+        ):
+            with self.assertRaises(Stage2RunnerError) as ctx:
+                client.chat_json(messages=[{"role": "user", "content": "hi"}], max_tokens=32)
+
+        self.assertIn("llm1 网络错误", str(ctx.exception))
+
+    def test_client_reports_missing_litellm_dependency_clearly(self) -> None:
+        client = LiteLLMClient(
+            model="test-model",
+            base_url="https://example.com/v1",
+            api_keys=("test-key",),
+            slot="llm1",
         )
 
         with (
-            patch("runtime.stage2.runner.urlopen", side_effect=[rate_limited, response]) as mocked_urlopen,
-            patch("runtime.stage2.runner.time.sleep") as mocked_sleep,
+            patch.object(runner_module, "completion", None),
+            patch.object(runner_module, "_LITELLM_IMPORT_ERROR", ModuleNotFoundError("No module named 'litellm'")),
         ):
-            result = client._request(
-                payload={"model": "test-model", "messages": [{"role": "user", "content": "hi"}]},
-                estimated_tokens=100,
-            )
+            with self.assertRaises(Stage2RunnerError) as ctx:
+                client.chat_json(messages=[{"role": "user", "content": "hi"}], max_tokens=32)
 
-        self.assertTrue(result["choices"])
-        self.assertEqual(mocked_urlopen.call_count, 2)
-        mocked_sleep.assert_called_once_with(0.0)
+        self.assertIn("未安装 litellm", str(ctx.exception))
 
 
 if __name__ == "__main__":

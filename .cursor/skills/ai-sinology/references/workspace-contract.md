@@ -58,11 +58,9 @@ Skill 在每次推进阶段后都应同步更新这个文件。
 - 文件：`2_primary_corpus.yaml`
 - 启动阶段二前，应先确认 `1_journal_targeting.md` 与 `1_research_proposal.md` 两个阶段一正式文件都已生成。
 - 阶段二只负责原始文献勘查与一手灵感积累，不与二手学术史混写。
-- 阶段二默认直接读取阶段一文件，优先读取 `stage2_retrieval_themes`，没有时才回退到研究方向与 idea 的兜底推断；不等待后置 scholarship map。
-- 阶段二粗筛为了节省 token，只要求模型返回类似 `{"1":"T","2":"F"}` 的扁平 JSON；运行时必须按阶段一主题顺序把序号还原为完整主题，再继续精筛、仲裁与最终 `matched_theme` 写回。
-- 由 Skill 外部运行时生成；Skill 只约束写回契约。
+- 阶段二默认直接读取阶段一文件，优先读取 `stage2_retrieval_themes`；不等待后置 scholarship map。
+- 由 Skill 外部运行时生成；Skill 只约束写回契约，不重述运行时内部实现。
 - 推荐同时提供：`outputs/<project>/_stage2/manifest.json`
-- 推荐同时保留：`outputs/<project>/_stage2/session.json`
 
 `2_primary_corpus.yaml` 的最小结构：
 
@@ -84,58 +82,76 @@ records:
 - `matched_theme`
 - `original_text`
 
+后续阶段只需要据此读取原始材料、主题归属与可引用正文，不依赖运行时内部状态文件。
+
 ### 阶段三
 
 - 阶段三拆成 `3A`、`3B`、`3C` 三段。
 - `3A` 文件：`3a_deepened_thinking.md`
 - `3B` 过程目录：`outputs/<project>/_stage3b/`
-- `3C` 文件：`3c_scholarship_map.yaml`
+- `3C` 文件：`3c_scholarship_map.md`
 - 阶段三要被判定为完成，至少还必须具备：
   - `outputs/<project>/_stage3b/candidate_papers.md`
   - `outputs/<project>/_stage3b/papers/`，且目录内至少有 1 份人工导入的论文、题录导出或笔记
 - `3B` 推荐额外保留：
   - `openalex-*.json`
-  - `baidu-scholar-*.json`
   - `screening-notes.md`
 - 上述 `_stage3b/` 文件都属于过程产物，不替代正式阶段文件。
 - `3A` 应先基于阶段一与阶段二原始文献，提炼出更深的问题意识、暂定判断和后续验证重点。
 - `3B` 负责二手研究的检索扩展与候选集收敛。
 - `3C` 必须读取 `3A` 的思考结果、`candidate_papers.md`，以及 `papers/` 中人工导入的论文/题录/笔记，再生成结构化 scholarship map。
 
-`3c_scholarship_map.yaml` 的最小结构：
+`3c_scholarship_map.md` 的最小结构：
 
-```yaml
+```markdown
+---
 research_question: "..."
 target_journals:
   - "..."
-core_works:
-  - scholar: "..."
-    work: "..."
-    claim: "..."
-major_positions:
-  - label: "路径A"
-    claims:
-      - "..."
-debates:
-  - issue: "..."
-    positions:
-      - label: "观点A"
-        claim: "..."
-gaps_to_address:
+literature_scope_keywords:
   - "..."
-usable_frames:
+period_hint: "..."
+gaps_to_address:
   - "..."
 claim_boundaries:
   - "..."
+---
+
+## Core Works
+
+### Scholar A, Work A
+- 核心观点：...
+- 与本文关系：...
+
+## Major Positions
+
+### 路径A
+- 核心主张：...
+- 代表作品：...
+
+## Debates
+
+### 争点A
+- 观点一：...
+- 观点二：...
+
+## Gaps To Address
+
+- ...
+
+## Usable Frames
+
+- ...
 ```
 
 Skill 端真正依赖的字段只有：
 
-- `core_works`
-- `major_positions`
-- `debates`
+- `research_question`
+- `target_journals`
 - `gaps_to_address`
 - `claim_boundaries`
+
+后续阶段默认读取 front matter 与固定章节标题，不要求额外解析脚本。
 
 ### 阶段四
 

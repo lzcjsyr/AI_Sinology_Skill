@@ -3,33 +3,37 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import json
 from pathlib import Path
 import re
-from socket import timeout as SocketTimeout
-import time
+from threading import Lock
+import sys
 from typing import Any, Callable, Iterable, Iterator, TypeVar
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+
+try:
+    from litellm import APIConnectionError, BadRequestError, Timeout, UnsupportedParamsError, completion
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised via direct-script runtime path
+    APIConnectionError = BadRequestError = Timeout = UnsupportedParamsError = Exception
+    completion = None
+    _LITELLM_IMPORT_ERROR = exc
+else:
+    _LITELLM_IMPORT_ERROR = None
 
 from .api_config import (
-    RateControllerRegistry,
     STAGE2_RUNTIME_DEFAULTS,
-    SlotRateController,
-    estimate_request_tokens,
     fallback_payload,
+    litellm_response_to_dict,
+    normalize_litellm_base_url,
     scaled_slot_worker_limit,
     screening_batch_char_limit,
     slot_payload,
 )
 from .catalog import (
-    PAGE_MARKER_PATTERN,
-    TECH_COMMENT_PATTERN,
     AnalysisTargetSelection,
     ResolvedAnalysisTarget,
+    extract_fragment_rows,
     resolve_analysis_targets,
     text_files_for_repo_dir,
 )
@@ -71,10 +75,6 @@ TARGETS_DIR_NAME = "targets"
 FINAL_CORPUS_FILE_NAME = "2_primary_corpus.yaml"
 PIPELINE_STATE_VERSION = 2
 ProgressCallback = Callable[[dict[str, Any]], None]
-HTTP_429_MAX_RETRIES = 4
-HTTP_429_BACKOFF_SECONDS = 2.0
-HTTP_429_BACKOFF_CAP_SECONDS = 30.0
-TRANSIENT_HTTP_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 WorkItem = TypeVar("WorkItem")
 TaskResult = TypeVar("TaskResult")
 MANUAL_REVIEW_REQUIRED_REASON = "MANUAL_REVIEW_REQUIRED"
@@ -105,6 +105,16 @@ class Stage2FallbackExhaustedError(Stage2FormatError):
         super().__init__(
             f"主模型格式失败：{primary_error} | fallback={fallback_model} 连续失败 {len(self.fallback_errors)} 次：{detail}"
         )
+
+
+def _require_litellm() -> Callable[..., Any]:
+    if completion is None:
+        raise Stage2RunnerError(
+            "未安装 litellm，无法执行阶段二模型调用。"
+            f" 当前解释器: {sys.executable}。"
+            " 请切换到已安装依赖的环境，或执行该解释器的 `-m pip install -r requirements.txt`。"
+        ) from _LITELLM_IMPORT_ERROR
+    return completion
 
 
 @dataclass(frozen=True)
@@ -172,24 +182,6 @@ def _emit_progress(progress_callback: ProgressCallback | None, **payload: Any) -
     )
 
 
-def _clean_fragment_text(text: str) -> str:
-    lines: list[str] = []
-    for raw_line in text.splitlines():
-        if raw_line.startswith("#+"):
-            continue
-        stripped = raw_line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#"):
-            payload = stripped.lstrip("#").strip()
-            if payload and TECH_COMMENT_PATTERN.search(payload):
-                continue
-        cleaned = PAGE_MARKER_PATTERN.sub("", stripped).replace("¶", "").strip()
-        if cleaned:
-            lines.append(cleaned)
-    return "\n".join(lines).strip()
-
-
 def _normalize_title(raw_title: str) -> str:
     text = str(raw_title).strip()
     if "/" in text:
@@ -201,41 +193,20 @@ def _split_file_to_fragments(file_path: Path, repo_dir: str) -> list[Fragment]:
     raw_text = file_path.read_text(encoding="utf-8", errors="ignore")
     title_match = TITLE_PATTERN.search(raw_text)
     source_file = _normalize_title(title_match.group(1)) if title_match else file_path.stem
-    matches = list(PAGE_MARKER_PATTERN.finditer(raw_text))
-
-    fragments: list[Fragment] = []
-    if not matches:
-        cleaned = _clean_fragment_text(raw_text)
-        if cleaned:
-            fragments.append(
-                Fragment(
-                    piece_id=f"{file_path.stem}_fallback_0001",
-                    source_file=source_file,
-                    original_text=cleaned,
-                    repo_dir=repo_dir,
-                    text_file=file_path.name,
-                )
-            )
-        return fragments
-
-    for index, match in enumerate(matches):
-        marker = raw_text[match.start() : match.end()]
-        piece_id = marker[4:-1].strip()
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw_text)
-        cleaned = _clean_fragment_text(raw_text[start:end])
-        if not piece_id or not cleaned:
-            continue
-        fragments.append(
-            Fragment(
-                piece_id=piece_id,
-                source_file=source_file,
-                original_text=cleaned,
-                repo_dir=repo_dir,
-                text_file=file_path.name,
-            )
+    return [
+        Fragment(
+            piece_id=piece_id,
+            source_file=source_file,
+            original_text=cleaned,
+            repo_dir=repo_dir,
+            text_file=file_path.name,
         )
-    return fragments
+        for piece_id, cleaned in extract_fragment_rows(
+            raw_text,
+            fallback_piece_id=f"{file_path.stem}_fallback_0001",
+            compact_whitespace=False,
+        )
+    ]
 
 
 def _build_batches(fragments: list[Fragment]) -> list[Batch]:
@@ -369,124 +340,79 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     return payload
 
 
-def _build_chat_url(base_url: str) -> str:
-    raw = str(base_url).rstrip("/")
-    if raw.endswith("/chat/completions"):
-        return raw
-    split = urlsplit(raw)
-    path = split.path.rstrip("/") + "/chat/completions"
-    return urlunsplit((split.scheme, split.netloc, path, split.query, split.fragment))
+def _exception_status_code(exc: Exception) -> int | None:
+    raw = getattr(exc, "status_code", None)
+    if raw is None:
+        response = getattr(exc, "response", None)
+        raw = getattr(response, "status_code", None)
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
-class OpenAICompatClient:
-    """极简 OpenAI-compatible 客户端，避免额外依赖。"""
+@dataclass
+class LiteLLMClient:
+    """阶段二 LiteLLM 客户端。"""
 
-    def __init__(
+    model: str
+    base_url: str
+    api_keys: tuple[str, ...]
+    slot: str
+    provider: str = ""
+    fallback_client: LiteLLMClient | None = None
+    fallback_max_retries: int = 0
+    _api_key_cursor: int = field(default=0, init=False, repr=False)
+    _api_key_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.base_url = normalize_litellm_base_url(self.base_url)
+        self.api_keys = tuple(str(key) for key in self.api_keys if str(key).strip())
+        if not self.api_keys:
+            raise Stage2RunnerError(f"{self.slot} 未配置 API key。")
+        self.fallback_max_retries = max(0, int(self.fallback_max_retries))
+
+    def effective_worker_limit(self, *, requested_workers: int) -> int:
+        return max(1, int(requested_workers))
+
+    def _next_api_key(self) -> str:
+        if len(self.api_keys) == 1:
+            return self.api_keys[0]
+        with self._api_key_lock:
+            api_key = self.api_keys[self._api_key_cursor]
+            self._api_key_cursor = (self._api_key_cursor + 1) % len(self.api_keys)
+            return api_key
+
+    def _completion_kwargs(
         self,
         *,
-        model: str,
-        base_url: str,
-        api_keys: tuple[str, ...],
-        slot: str,
-        provider: str = "",
-        rate_controller: SlotRateController | None = None,
-        fallback_client: OpenAICompatClient | None = None,
-        fallback_max_retries: int = 0,
-    ) -> None:
-        if not api_keys:
-            raise Stage2RunnerError(f"{slot} 未配置 API key。")
-        self.model = model
-        self.base_url = base_url
-        self.api_keys = api_keys
-        self.slot = slot
-        self.provider = provider
-        self.rate_controller = rate_controller
-        self.fallback_client = fallback_client
-        self.fallback_max_retries = max(0, int(fallback_max_retries))
-
-    def effective_worker_limit(self, *, requested_workers: int, estimated_tokens: int) -> int:
-        if self.rate_controller is None:
-            return max(1, int(requested_workers))
-        return self.rate_controller.effective_worker_limit(
-            requested_workers=requested_workers,
-            estimated_tokens=estimated_tokens,
-        )
-
-    def _request(
-        self,
-        *,
-        payload: dict[str, Any],
-        estimated_tokens: int,
-        allow_response_format: bool = True,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        allow_response_format: bool,
     ) -> dict[str, Any]:
-        body = dict(payload)
-        if not allow_response_format:
-            body.pop("response_format", None)
-        attempt = 0
-        request_timeout = _request_timeout_seconds()
-        network_retry_limit = _network_error_max_retries()
-        while True:
-            reservation = (
-                self.rate_controller.acquire(estimated_tokens=estimated_tokens)
-                if self.rate_controller is not None
-                else None
-            )
-            api_key = reservation.api_key if reservation is not None else self.api_keys[0]
-            request = Request(
-                _build_chat_url(self.base_url),
-                data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            try:
-                with urlopen(request, timeout=request_timeout) as response:
-                    response_payload = json.loads(response.read().decode("utf-8"))
-                    if reservation is not None:
-                        usage = response_payload.get("usage") or {}
-                        self.rate_controller.finalize(
-                            reservation,
-                            actual_tokens=int(usage.get("total_tokens") or estimated_tokens),
-                        )
-                    return response_payload
-            except HTTPError as exc:
-                message = exc.read().decode("utf-8", errors="ignore")
-                if allow_response_format and exc.code in {400, 404, 422}:
-                    if reservation is not None:
-                        self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
-                    return self._request(
-                        payload=payload,
-                        estimated_tokens=estimated_tokens,
-                        allow_response_format=False,
-                    )
-                if reservation is not None:
-                    self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
-                if exc.code in TRANSIENT_HTTP_STATUS_CODES and attempt < min(HTTP_429_MAX_RETRIES, network_retry_limit):
-                    attempt += 1
-                    time.sleep(self._http_retry_delay(exc, attempt=attempt))
-                    continue
-                raise Stage2RunnerError(f"{self.slot} 请求失败: HTTP {exc.code} {message[:500]}") from exc
-            except (URLError, TimeoutError, SocketTimeout) as exc:
-                if reservation is not None:
-                    self.rate_controller.finalize(reservation, actual_tokens=estimated_tokens)
-                if attempt < network_retry_limit:
-                    attempt += 1
-                    time.sleep(self._http_retry_delay(None, attempt=attempt))
-                    continue
-                raise Stage2RunnerError(f"{self.slot} 网络错误: {exc}") from exc
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": _request_timeout_seconds(),
+            "num_retries": _network_error_max_retries(),
+            "custom_llm_provider": "openai",
+            "api_key": self._next_api_key(),
+            "base_url": self.base_url,
+        }
+        if allow_response_format:
+            kwargs["response_format"] = {"type": "json_object"}
+        return kwargs
 
-    @staticmethod
-    def _http_retry_delay(exc: HTTPError | None, *, attempt: int) -> float:
-        if exc is not None:
-            retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
-            if retry_after is not None:
-                try:
-                    return max(0.0, min(float(retry_after), HTTP_429_BACKOFF_CAP_SECONDS))
-                except (TypeError, ValueError):
-                    pass
-        return min(HTTP_429_BACKOFF_SECONDS * (2 ** max(0, attempt - 1)), HTTP_429_BACKOFF_CAP_SECONDS)
+    def _request_error(self, exc: Exception) -> Stage2RunnerError:
+        if isinstance(exc, (APIConnectionError, Timeout)):
+            return Stage2RunnerError(f"{self.slot} 网络错误: {exc}")
+        status_code = _exception_status_code(exc)
+        if status_code is not None:
+            return Stage2RunnerError(f"{self.slot} 请求失败: HTTP {status_code} {exc}")
+        return Stage2RunnerError(f"{self.slot} 请求失败: {exc}")
 
     def chat_json(
         self,
@@ -495,18 +421,36 @@ class OpenAICompatClient:
         max_tokens: int = 4000,
         temperature: float = 0.0,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"},
-        }
-        response = self._request(
-            payload=payload,
-            estimated_tokens=estimate_request_tokens(messages=messages, max_tokens=max_tokens),
-            allow_response_format=True,
-        )
+        litellm_completion = _require_litellm()
+        try:
+            response = litellm_response_to_dict(
+                litellm_completion(
+                    **self._completion_kwargs(
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        allow_response_format=True,
+                    )
+                )
+            )
+        except Exception as exc:
+            status_code = _exception_status_code(exc)
+            if isinstance(exc, (BadRequestError, UnsupportedParamsError)) and status_code in {400, 404, 422}:
+                try:
+                    response = litellm_response_to_dict(
+                        litellm_completion(
+                            **self._completion_kwargs(
+                                messages=messages,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                allow_response_format=False,
+                            )
+                        )
+                    )
+                except Exception as retry_exc:  # noqa: BLE001
+                    raise self._request_error(retry_exc) from retry_exc
+            else:
+                raise self._request_error(exc) from exc
         choices = response.get("choices") or []
         if not choices:
             raise Stage2FormatError(f"{self.slot} 未返回 choices。")
@@ -701,12 +645,12 @@ def _compact_usage_stats(usage: dict[str, Any]) -> dict[str, Any]:
 
 def _screen_batch_coarse(
     *,
-    client: OpenAICompatClient,
+    client: LiteLLMClient,
     slot: str,
     batch: Batch,
     target_themes: list[dict[str, str]],
 ) -> dict[str, Any]:
-    def invoke(active_client: OpenAICompatClient) -> dict[str, Any]:
+    def invoke(active_client: LiteLLMClient) -> dict[str, Any]:
         payload, usage = active_client.chat_json(
             messages=_coarse_screening_messages(target_themes=target_themes, batch=batch),
             max_tokens=400,
@@ -723,7 +667,6 @@ def _screen_batch_coarse(
         return _run_with_format_fallback(client=client, invoke=invoke)
     except Stage2FallbackExhaustedError as exc:
         return _coarse_manual_review_row(
-            client=client,
             batch=batch,
             target_themes=target_themes,
             exc=exc,
@@ -734,13 +677,13 @@ def _screen_batch_coarse(
 
 def _screen_batch_targeted(
     *,
-    client: OpenAICompatClient,
+    client: LiteLLMClient,
     slot: str,
     batch: Batch,
     theme: str,
     fragment_map: dict[str, Fragment],
 ) -> dict[str, Any]:
-    def invoke(active_client: OpenAICompatClient) -> dict[str, Any]:
+    def invoke(active_client: LiteLLMClient) -> dict[str, Any]:
         payload, usage = active_client.chat_json(
             messages=_targeted_screening_messages(theme=theme, batch=batch, fragment_map=fragment_map),
             max_tokens=5000,
@@ -778,10 +721,10 @@ def _normalize_arbitration_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _arbitrate_dispute(
     *,
-    client: OpenAICompatClient,
+    client: LiteLLMClient,
     dispute: dict[str, Any],
 ) -> dict[str, Any]:
-    def invoke(active_client: OpenAICompatClient) -> dict[str, Any]:
+    def invoke(active_client: LiteLLMClient) -> dict[str, Any]:
         payload, usage = active_client.chat_json(
             messages=_arbitration_messages(
                 theme=str(dispute["matched_theme"]),
@@ -814,7 +757,6 @@ def _arbitrate_dispute(
 
 def _iter_windowed_futures(
     *,
-    executor: ThreadPoolExecutor,
     items: Iterable[WorkItem],
     max_in_flight: int,
     submit_job: Callable[[WorkItem], Future[Any]],
@@ -851,8 +793,8 @@ def _iter_windowed_futures(
 
 def _run_with_format_fallback(
     *,
-    client: OpenAICompatClient,
-    invoke: Callable[[OpenAICompatClient], TaskResult],
+    client: LiteLLMClient,
+    invoke: Callable[[LiteLLMClient], TaskResult],
 ) -> TaskResult:
     try:
         return invoke(client)
@@ -879,12 +821,10 @@ def _manual_review_reason(exc: Stage2FallbackExhaustedError) -> str:
 
 def _coarse_manual_review_row(
     *,
-    client: OpenAICompatClient,
     batch: Batch,
     target_themes: list[dict[str, str]],
     exc: Stage2FallbackExhaustedError,
 ) -> dict[str, Any]:
-    fallback_client = client.fallback_client
     return {
         "batch_id": batch.batch_id,
         "source_file": batch.source_file,
@@ -934,7 +874,7 @@ def _targeted_manual_review_row(
 
 def _arbitration_manual_review_row(
     *,
-    client: OpenAICompatClient,
+    client: LiteLLMClient,
     dispute: dict[str, Any],
     exc: Stage2FallbackExhaustedError,
 ) -> dict[str, Any]:
@@ -1303,7 +1243,7 @@ def _load_cached_rows_by_key(path: Path, key: str) -> dict[str, dict[str, Any]]:
 
 def _run_coarse_batches(
     *,
-    client: OpenAICompatClient,
+    client: LiteLLMClient,
     slot: str,
     batches: list[Batch],
     fragment_map: dict[str, Fragment],
@@ -1336,18 +1276,10 @@ def _run_coarse_batches(
     if not pending_batches:
         return [cached[batch.batch_id] for batch in batches if batch.batch_id in cached]
 
-    batch_map = {batch.batch_id: batch for batch in batches}
     finished_count = len(cached)
-    effective_workers = client.effective_worker_limit(
-        requested_workers=workers,
-        estimated_tokens=max(
-            estimate_request_tokens(messages=_coarse_screening_messages(target_themes=target_themes, batch=batch), max_tokens=400)
-            for batch in pending_batches
-        ),
-    )
+    effective_workers = client.effective_worker_limit(requested_workers=workers)
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         for batch, future in _iter_windowed_futures(
-            executor=executor,
             items=pending_batches,
             max_in_flight=effective_workers,
             submit_job=lambda item: executor.submit(
@@ -1444,7 +1376,7 @@ def _build_candidate_pairs(
 
 def _run_targeted_pairs(
     *,
-    client: OpenAICompatClient,
+    client: LiteLLMClient,
     slot: str,
     candidate_pairs: list[dict[str, Any]],
     batches: list[Batch],
@@ -1479,23 +1411,9 @@ def _run_targeted_pairs(
 
     batch_map = {batch.batch_id: batch for batch in batches}
     finished_count = len(cached)
-    effective_workers = client.effective_worker_limit(
-        requested_workers=workers,
-        estimated_tokens=max(
-            estimate_request_tokens(
-                messages=_targeted_screening_messages(
-                    theme=str(pair["matched_theme"]),
-                    batch=batch_map[str(pair["batch_id"])],
-                    fragment_map=fragment_map,
-                ),
-                max_tokens=5000,
-            )
-            for pair in pending_pairs
-        ),
-    )
+    effective_workers = client.effective_worker_limit(requested_workers=workers)
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         for pair, future in _iter_windowed_futures(
-            executor=executor,
             items=pending_pairs,
             max_in_flight=effective_workers,
             submit_job=lambda item: executor.submit(
@@ -1668,7 +1586,7 @@ def _build_consensus_and_disputes(
 
 def _run_arbitration(
     *,
-    client: OpenAICompatClient,
+    client: LiteLLMClient,
     disputes_path: Path,
     fragment_map: dict[str, Fragment],
     output_path: Path,
@@ -1696,25 +1614,10 @@ def _run_arbitration(
             total=len(disputes),
         )
     if pending_disputes:
-        effective_workers = client.effective_worker_limit(
-            requested_workers=workers,
-            estimated_tokens=max(
-                estimate_request_tokens(
-                    messages=_arbitration_messages(
-                        theme=str(dispute["matched_theme"]),
-                        original_text=str(dispute["original_text"]),
-                        llm1_result=dispute["llm1_result"],
-                        llm2_result=dispute["llm2_result"],
-                    ),
-                    max_tokens=1200,
-                )
-                for dispute in pending_disputes
-            ),
-        )
+        effective_workers = client.effective_worker_limit(requested_workers=workers)
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
             resolved_count = len(cached)
             for dispute, future in _iter_windowed_futures(
-                executor=executor,
                 items=pending_disputes,
                 max_in_flight=effective_workers,
                 submit_job=lambda item: executor.submit(_arbitrate_dispute, client=client, dispute=item),
@@ -1890,29 +1793,26 @@ def _clear_target_workspace(target_dir: Path) -> None:
             path.unlink()
 
 
-def _build_clients(*, dotenv_path: str | Path | None) -> dict[str, OpenAICompatClient]:
-    clients: dict[str, OpenAICompatClient] = {}
-    registry = RateControllerRegistry()
+def _build_clients(*, dotenv_path: str | Path | None) -> dict[str, LiteLLMClient]:
+    clients: dict[str, LiteLLMClient] = {}
     fallback_config = fallback_payload(dotenv_path=dotenv_path)
-    fallback_client: OpenAICompatClient | None = None
+    fallback_client: LiteLLMClient | None = None
     if fallback_config.get("enabled"):
-        fallback_client = OpenAICompatClient(
+        fallback_client = LiteLLMClient(
             model=str(fallback_config["model"]),
             base_url=str(fallback_config["base_url"]),
             api_keys=tuple(str(key) for key in fallback_config["api_keys"] or () if str(key).strip()),
             slot="fallback",
             provider=str(fallback_config["provider"]),
-            rate_controller=None,
         )
     for slot in ("llm1", "llm2", "llm3"):
         payload = slot_payload(slot, dotenv_path=dotenv_path)
-        clients[slot] = OpenAICompatClient(
+        clients[slot] = LiteLLMClient(
             model=str(payload["model"]),
             base_url=str(payload["base_url"]),
             api_keys=tuple(str(key) for key in payload["api_keys"] or () if str(key).strip()),
             slot=slot,
             provider=str(payload["provider"]),
-            rate_controller=registry.get(payload),
             fallback_client=fallback_client,
             fallback_max_retries=int(fallback_config.get("max_retries") or 0),
         )
@@ -1965,6 +1865,7 @@ def run_stage2_pipeline(
     force_rerun: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
+    _require_litellm()
     project_path = Path(project_dir).expanduser().resolve()
     manifest = _load_manifest(project_path)
     selection = _selection_from_manifest(manifest)
